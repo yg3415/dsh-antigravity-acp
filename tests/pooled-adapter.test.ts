@@ -191,6 +191,33 @@ describe('会话粘性（ACP 会话复用需要同一 worker）', () => {
 })
 
 describe('PooledAcpAdapter scheduling with independent fake workers', () => {
+  it('需求 1019：不同会话同时生成，超过原来的 4 个上限也不排队', async () => {
+    const { pool, workers } = setup()
+    const runs = ['a', 'b', 'c', 'd', 'e'].map(id => run(pool, request(id)))
+    await flush()
+    expect(workers).toHaveLength(5)
+    expect(workers.map(w => w.calls.length)).toEqual([1, 1, 1, 1, 1])
+    expect(pool.read().queue).toMatchObject({ active: 5, waiting: 0, workers: 5 })
+    for (const worker of workers) worker.calls[0]!.complete('finish')
+    await Promise.all(runs)
+  })
+
+  it('新对话接手官方进程已回收的空闲 worker，不再新开', async () => {
+    const { pool, workers } = setup()
+    const a = run(pool, request('a'))
+    await flush()
+    workers[0]!.calls[0]!.complete('finish')
+    await a
+    // 官方进程空闲回收以后，worker 上已没有可复用的 ACP 会话。
+    workers[0]!.running = false
+    const b = run(pool, request('b'))
+    await flush()
+    expect(workers).toHaveLength(1)
+    expect(workers[0]!.calls.map(call => call.options.sessionId)).toEqual(['a', 'b'])
+    workers[0]!.calls[1]!.complete('finish')
+    await b
+  })
+
   it('runs different sessions concurrently up to capacity and queues the third', async () => {
     const { pool, workers } = setup({ capacity: 2 })
     const a = run(pool, request('a'))

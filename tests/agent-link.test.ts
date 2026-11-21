@@ -535,6 +535,11 @@ describe('launchAcpAgent', () => {
     expect(env.SystemRoot).toBe('C:\\Windows')
   })
 
+  it('需求 1017：officialAgentEnv 让官方进程从文件读插件备好的登录态', () => {
+    const env = officialAgentEnv({ binaryDir: '/bin', tmpDir: '/tmp/agy', parent: {} })
+    expect(env.AGY_ACP_FORCE_FILE_STORAGE).toBe('1')
+  })
+
   it('officialAgentEnv 未配置代理时不注入任何 *_PROXY 变量', () => {
     const env = officialAgentEnv({ binaryDir: 'D:\\bin', tmpDir: 'D:\\tmp\\agy', parent: {} })
     expect(Object.keys(env).filter((key) => key.toLowerCase().includes('proxy'))).toEqual([])

@@ -3,7 +3,7 @@
  * 临时文件失败清理。全部使用注入的 fake fetch / 真实临时目录，无网络。
  */
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -386,6 +386,36 @@ describe('ensureAgentBinary 临时文件清理', () => {
       expect(resolution.executablePath.replaceAll('\\', '/')).toContain(
         `1.4.0/extract-1.4.0/${archiveRoot}/bin/${executableName}`,
       )
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('需求 1018：官方包里的 helper 也补上执行位', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'agy-cache-'))
+    try {
+      const archive = zip([
+        { name: 'agy_acp_server.par', data: Buffer.from('fake executable') },
+        { name: 'localharness_external', data: Buffer.from('fake helper') },
+      ])
+      const resolution = await ensureAgentBinary({ autoDownload: true, version: '1.4.0', cacheDir, fetchImpl: fakeFetch(200, Uint8Array.from(archive)) })
+      const helper = join(resolution.executablePath, '..', 'localharness_external')
+      expect((await stat(helper)).mode & 0o111).toBe(0o111)
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('需求 1018：命中缓存时给少了执行位的 helper 补上', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'agy-cache-'))
+    try {
+      const extract = join(cacheDir, '1.4.0', 'extract-1.4.0')
+      await mkdir(extract, { recursive: true })
+      await writeFile(join(extract, 'agy_acp_server.par'), 'fake executable', { mode: 0o644 })
+      await writeFile(join(extract, 'localharness_external'), 'fake helper', { mode: 0o644 })
+      const resolution = await ensureAgentBinary({ autoDownload: false, version: '1.4.0', cacheDir })
+      expect(resolution.source).toBe('cache')
+      expect((await stat(join(extract, 'localharness_external'))).mode & 0o111).toBe(0o111)
     } finally {
       await rm(cacheDir, { recursive: true, force: true })
     }

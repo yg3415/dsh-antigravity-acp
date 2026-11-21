@@ -34,7 +34,9 @@ describe('live settings schema and runtime references', () => {
     expect(config.proxyMode).toBe(false)
     expect(config.cancelGraceMs).toBe(0)
     expect(config.idleRecycleMs).toBe(0)
-    expect(config.maxConcurrentSessions).toBe(2)
+    // 需求 1019：并发不设上限，也没有排队超时。
+    expect('maxConcurrentSessions' in config).toBe(false)
+    expect('queueTimeoutMs' in config).toBe(false)
     expect(config.handshakeTimeoutMs).toBe(120000)
     expect(config.extraArgs).toEqual([])
     expect(config.modelOverrides).toEqual({})

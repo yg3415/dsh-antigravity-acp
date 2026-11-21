@@ -171,7 +171,7 @@ function loadRegistrations(options: QuotaStubOptions = {}): Map<string, SlotRegi
     modelDirectories: {
       // 宿主的 ModelDirectoryResolver 经 cordis 可追踪代理以**调用方**上下文读取
       // `this.ctx.remote.session`（会话目录首次创建时），调用方必须声明 remote.session。
-      directoryFor: () => (void scope.remote.session, {
+      directoryFor: () => (void (scope.remote as Record<string, unknown>).session, {
         store: {
           subscribe: () => () => {},
           getSnapshot: () => (options.quotaProvider ? { current: { provider: options.quotaProvider } } : {}),

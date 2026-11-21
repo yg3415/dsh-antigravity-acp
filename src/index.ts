@@ -19,6 +19,8 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { AntigravityAcpAdapter, AGY_PROVIDER_ID } from './adapter/antigravity-adapter.js'
 import type { AdapterMetadata } from './adapter/antigravity-adapter.js'
 import { PooledAcpAdapter } from './pool/pooled-adapter.js'
+import { busyFile, busyTurnListener, createBusyLedger, noteConversationRequest, resumeOnBoot, trackRequests } from './runtime/restart-resume.js'
+import type { ResumeServices } from './runtime/restart-resume.js'
 import { AgentLink, agentStreamFromSubprocess, AGY_CLIENT_INFO, AGY_LINK_ERROR, launchAcpAgent } from './protocol/agent-link.js'
 import type { AgentLinkHandlers } from './protocol/agent-link.js'
 import {
@@ -699,6 +701,29 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
   const unsubscribeAccount = proxyAccount.subscribe(catalogChanged)
   ctx.plugin(AgYProxyAccountService, proxyAccount)
 
+  // 需求 1020：dsh 重启时在跑的一轮，重启后接着做。两条路由的主对话请求都记进
+  // busy 文件（代理行经 antigravityRestartLedger 交过来），一轮正常结束时删掉。
+  const restartLedger = createBusyLedger(busyFile(cacheDir), {
+    warn: (message) => ctx.logger?.warn?.(message),
+  })
+  const noteRequest = (options: Parameters<typeof noteConversationRequest>[1]) => noteConversationRequest(restartLedger, options)
+  trackRequests(adapter, noteRequest)
+  const unprovideLedger = ctx.provide('antigravityRestartLedger', { note: noteRequest })
+  const unsubscribeTurns = ctx.on('session/event' as never, busyTurnListener(restartLedger) as never) as unknown as () => void
+  const resumeServices: ResumeServices = {}
+  ctx.inject(['sessionController'], (scope) => {
+    resumeServices.sessionController = scope.get('sessionController') as ResumeServices['sessionController']
+  })
+  ctx.inject(['agents'], (scope) => { resumeServices.agents = scope.get('agents') as ResumeServices['agents'] })
+  ctx.inject(['goals'], (scope) => { resumeServices.goals = scope.get('goals') as ResumeServices['goals'] })
+  resumeOnBoot(restartLedger, () => ({
+    ...resumeServices,
+    subagents: ctx.get('subagents' as never) as ResumeServices['subagents'],
+  }), {
+    info: (message) => ctx.logger?.info?.(message),
+    warn: (message) => ctx.logger?.warn?.(message),
+  })
+
   const registration = ctx.llm.registerAdapter([AGY_PROVIDER_ID], adapter)
   // 互斥切换：代理模式开启时把 ACP 路由原子替换为空集（registration 保留，
   // 关闭时 replace 回来）；代理路由的注册/注销由代理行订阅同一总线完成。
@@ -769,7 +794,7 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
 
   // cordis 4.x 的规范 dispose 挂点：generator effect，卸载时逆序执行。
   ctx.effect(function* () {
-    yield () => { unsubscribeMode(); unsubscribeModeBus(); unsubscribeAccount(); unprovideMode(); unprovideAuth() }
+    yield () => { unsubscribeMode(); unsubscribeModeBus(); unsubscribeAccount(); unprovideMode(); unprovideAuth(); unprovideLedger(); unsubscribeTurns?.() }
     yield () => registration()
     yield async () => control.dispose()
     yield async () => {

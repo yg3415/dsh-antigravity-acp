@@ -31,11 +31,11 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.useRealTimers()
   delete (globalThis as Record<symbol, unknown>)[BOOT_KEY]
-  await rm(dir, { recursive: true, force: true })
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 }) // 记账写入是后台的，可能还在写
 })
 
 const readBusy = async (): Promise<unknown> => JSON.parse(await readFile(file, 'utf8'))
-const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)) }
+const busyBecomes = (ids: string[]) => vi.waitFor(async () => expect(await readBusy()).toEqual(ids))
 
 function header(provider: string) {
   return { type: 'request/header', data: { header: { config: { provider, model: 'gemini-4-argon' } } } }
@@ -60,8 +60,8 @@ function fakeServices(sessions: Record<string, { events: unknown[]; origin?: 'su
         return { meta: { id, version: row.version ?? 4, origin: row.origin, parentSession: row.parentSession }, events: row.events } as never
       }),
       resolveAgent: vi.fn(async (id: string) => {
-        if (sessions[id]?.origin === 'subagent') return { error: new Error('owned by subagent routing') }
-        return { agent: agentFor(id) }
+        if (sessions[id]?.origin === 'subagent') return { error: new Error('owned by subagent routing') } as never
+        return { agent: agentFor(id) } as never
       }),
     },
     agents: { get: vi.fn(() => undefined) },
@@ -73,33 +73,29 @@ function fakeServices(sessions: Record<string, { events: unknown[]; origin?: 'su
 
 async function boot(services: ResumeServices) {
   vi.useFakeTimers({ toFake: ['setTimeout'] })
-  resumeOnBoot(createBusyLedger(file), () => services, {}, 10_000)
-  await settle()
+  const finished = resumeOnBoot(createBusyLedger(file), () => services, {}, 10_000)
   await vi.advanceTimersByTimeAsync(10_000)
   vi.useRealTimers()
-  await settle()
+  await finished
 }
 
 describe('busy 记账', () => {
   it('需求 1020：服务一次主对话请求后 busy 文件里有这个会话，收到它正常结束的 turn/end 后没有', async () => {
     const ledger = createBusyLedger(file)
-    const adapter = trackRequests({ async *stream() { yield 1 } }, options => noteConversationRequest(ledger, options))
+    const adapter = trackRequests({ async *stream(_options: unknown) { yield 1 } }, options => noteConversationRequest(ledger, options))
     for await (const _ of adapter.stream({ provider: 'antigravity-acp', model: 'm', messages: [], sessionId: 'session-a' } as never)) { /* drain */ }
-    await settle()
-    expect(await readBusy()).toEqual(['session-a'])
+    await busyBecomes(['session-a'])
     busyTurnListener(ledger)({ id: 'session-a' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
-    await settle()
-    expect(await readBusy()).toEqual([])
+    await busyBecomes([])
   })
 
   it('需求 1020：prepareCall 返回的流同样记 busy', async () => {
     const ledger = createBusyLedger(file)
-    const stream = async function* () { yield 1 }
-    const adapter = trackRequests({ stream, prepareCall: async () => ({ model: {}, stream }) }, options => noteConversationRequest(ledger, options))
+    const stream = async function* (_options: unknown) { yield 1 }
+    const adapter = trackRequests({ stream, prepareCall: async (_provider: string, _model: string) => ({ model: {}, stream }) }, options => noteConversationRequest(ledger, options))
     const call = await adapter.prepareCall('antigravity-proxy', 'm')
     for await (const _ of call.stream({ provider: 'antigravity-proxy', model: 'm', messages: [], sessionId: 'session-p' } as never)) { /* drain */ }
-    await settle()
-    expect(await readBusy()).toEqual(['session-p'])
+    await busyBecomes(['session-p'])
   })
 
   it('需求 1020：用户 Stop 和出错结束的轮把会话从 busy 里删掉', async () => {
@@ -109,8 +105,7 @@ describe('busy 记账', () => {
     const listen = busyTurnListener(ledger)
     listen({ id: 'session-stop' }, { type: 'turn/end', data: { reason: { kind: 'aborted', reason: { kind: 'user' } } } })
     listen({ id: 'session-error' }, { type: 'turn/end', data: { reason: { kind: 'error', error: { message: 'x' } } } })
-    await settle()
-    expect(await readBusy()).toEqual([])
+    await busyBecomes([])
   })
 
   it('需求 1020：dsh 关停（aborted / disposed）和冷加载补的 interrupted 结束的轮仍留在 busy 文件里', async () => {
@@ -120,7 +115,7 @@ describe('busy 记账', () => {
     const listen = busyTurnListener(ledger)
     listen({ id: 'session-disposed' }, { type: 'turn/end', data: { reason: { kind: 'aborted', reason: { kind: 'disposed' } } } })
     listen({ id: 'session-interrupted' }, { type: 'turn/end', data: { reason: { kind: 'interrupted' } } })
-    await settle()
+    await ledger.clear('sentinel') // 串行：之前排队的读改写都已做完
     expect(await readBusy()).toEqual(['session-disposed', 'session-interrupted'])
   })
 
@@ -129,7 +124,7 @@ describe('busy 记账', () => {
     noteConversationRequest(ledger, { sessionId: 'session-t' as never, purpose: 'session-title' as never })
     noteConversationRequest(ledger, { sessionId: 'session-c' as never, purpose: 'compaction' as never })
     noteConversationRequest(ledger, { sessionId: undefined })
-    await settle()
+    await ledger.clear('sentinel') // 串行：之前排队的读改写都已做完
     await expect(readFile(file, 'utf8')).rejects.toThrow()
   })
 })

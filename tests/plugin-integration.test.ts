@@ -191,7 +191,7 @@ afterEach(async () => {
   vi.unstubAllEnvs()
   vi.useRealTimers()
   delete (globalThis as Record<symbol, unknown>)[Symbol.for('dsh-antigravity-acp.restartResume')]
-  await rm(external.cacheDir, { recursive: true, force: true })
+  await rm(external.cacheDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 }) // 记账写入是后台的，可能还在写
 })
 
 describe('apply wiring with real pool and SettingsControl', () => {

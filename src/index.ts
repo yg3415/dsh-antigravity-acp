@@ -632,8 +632,6 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
       dispose: () => disposeAcpRuntime(active),
     }
   }, {
-    capacity: config.maxConcurrentSessions,
-    queueTimeoutMs: config.queueTimeoutMs,
     // 复用会话时同一对话必须粘在同一个 worker；关闭复用时回到纯负载调度。
     sessionAffinity: () => config.reuseSessions !== false,
   })

@@ -50,7 +50,7 @@ dsh plugin --profile web add ./dsh-bundle-antigravity-host-0.1.24.tgz
 
 连接支持取消。启动时自动预热默认开启（可在设置中关闭）；预热只准备连接，不预先运行一次模型生成。设置页区分连接已预热、目录 / 账户已验证与进程已停止，不能用上一次成功状态代表当前仍存活。
 
-生命周期面板每两秒读取内存状态，页面隐藏时暂停，离开后停止轮询；详细启动、凭据准备、握手、建会话、选模型、首块、首个工具及续轮耗时，以及活动、排队、保留工具回合和并发容量，折叠在「连接诊断」中。额度与 Credits 主要在对话输入框旁的药丸中查看；设置页「额度」页另提供手动拉取入口，与药丸共用同一个读取器，打开页面不会自动查询。
+生命周期面板每两秒读取内存状态，页面隐藏时暂停，离开后停止轮询；详细启动、凭据准备、握手、建会话、选模型、首块、首个工具及续轮耗时，以及活动、排队、保留工具回合和 worker 数，折叠在「连接诊断」中。额度与 Credits 主要在对话输入框旁的药丸中查看；设置页「额度」页另提供手动拉取入口，与药丸共用同一个读取器，打开页面不会自动查询。
 
 手动预热 / 目录刷新可从一次暂时回收故障中恢复，但持续无法确认进程退出时仍会失败，不复用未确认退出的连接。会话配置缺少模型选择器时保留已知目录，不把一次不完整响应当成模型已下架。
 
@@ -74,9 +74,9 @@ dsh plugin --profile web add ./dsh-bundle-antigravity-host-0.1.24.tgz
 
 ## 并发与工具续轮
 
-默认最多 2 个按需启动的 worker，可配置 1–4；每个 worker 独立拥有官方进程、连接、MCP 桥和 prompt 状态。等待队列最多 64 项，默认 120 秒超时；排队可取消，主对话优先于排队中的 `session-title`。已经运行的请求不会仅因优先级被抢占。
+worker 按需启动、不设上限，不同对话同时生成、互不排队；每个 worker 独立拥有官方进程、连接、MCP 桥和 prompt 状态。官方进程空闲 `idleRecycleMs` 后回收。
 
-同一会话、同一用途的重叠请求串行；保留的工具回合仍归原 worker。同会话同步压缩可回到该 worker 并受控重建，不等待自己的工具结果。原工具结果拥有优先回填路径，不会仅因无关队列已满而被拒绝。`session-title` 与 `compaction` 这类**一次性请求**的调用方不会回喂工具结果：这类回合收到工具调用时立即以错误结算该次调用（不 park），避免 worker 一直处于 busy、既不空闲回收也不释放池位。
+同一会话、同一用途的重叠请求串行（只有这种情况会等，等待可取消）；保留的工具回合仍归原 worker。同会话同步压缩可回到该 worker 并受控重建，不等待自己的工具结果。`session-title` 与 `compaction` 这类**一次性请求**的调用方不会回喂工具结果：这类回合收到工具调用时立即以错误结算该次调用（不 park），避免 worker 一直处于 busy、既不空闲回收也不释放池位。
 
 工具链路：
 
@@ -112,7 +112,9 @@ ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因�
 
 插件在 ACP 模式使用本机官方 ACP 的当前登录态；设置页没有保存多个 Google 账号或按会话选账号的入口。
 
-优先复用本机已有 ACP 凭据。需要导入时，只读 `~/.gemini/antigravity-cli/antigravity-oauth-token`，换发后写入官方 ACP 使用的 `~/.gemini/antigravity-acp/acp_token.json`，并在 `settings.json` 缺少认证方式时合并 `auth.type = oauth-personal`。保留既有设置与用户指定的其它认证方式，不覆盖无法解析的设置文件。
+优先复用本机已有 ACP 凭据。需要导入时，只读 `~/.gemini/antigravity-cli/antigravity-oauth-token`，换发后写入官方 ACP 使用的 `~/.gemini/antigravity-acp/acp_token.json`，并在 `settings.json` 缺少认证方式时合并 `auth.type = oauth-personal`。保留既有设置与用户指定的其它认证方式，不覆盖无法解析的设置文件。官方进程启动时固定带 `AGY_ACP_FORCE_FILE_STORAGE=1`：官方 server 1.4.0 在 macOS 上不设它就改读钥匙串，读不到这个文件，session/new 时拉起浏览器登录。
+
+解压官方包后给解压目录里的每个文件补执行位：1.4.0 的 macOS 包除主程序外还带 `localharness_external`，没有执行位时运行报 Permission denied。命中缓存时同样补，旧缓存会自己修好。
 
 这意味着插件**可能读写本机认证材料**，不是“完全不碰凭据”。CLI 源文件不由插件改写；有可用登录态时跳过浏览器授权。没有可用登录态且本次允许交互时才退回官方 OAuth。预热与非交互目录刷新不会暗中弹登录页。CLI 登录不会由 ACP 登录反向补齐。
 
@@ -230,7 +232,6 @@ onefile 临时展开使用用户级根目录内独立的 `runtime/instance-*`，
 | `AGY_AUTH_TIMEOUT` | 需要浏览器授权但未在期限内完成，或上游认证失败 | 检查官方登录状态、浏览器和代理；日志不要附完整 OAuth URL。 |
 | 连接已预热但目录为空 | 握手不等于已建会话 | 点击「连接 / 登录 ACP」或使用已登录 CLI 拉取目录；检查具体错误而不是反复发送聊天。 |
 | `AGY_INVALID_PROXY` / 代理相关失败（连接 Google 失败、换发或额度取数超时） | 代理格式、出口或宿主环境继承问题 | 非法地址不再阻断插件装载：直接在本插件设置卡片修正 `proxyUrl` 后重载 Host 即可。核对目标 Host 实际继承的环境；保存后已有 ACP 进程仍保留原启动环境。 |
-| `AGY_QUEUE_TIMEOUT` / `AGY_QUEUE_FULL` | worker 忙或保留工具回合，队列超时 / 已满 | 完成或取消旧工具审批；查看排队状态，按资源与账户限制调整并发。 |
 | `AGY_INCOMPATIBLE_PROTOCOL` / `AGY_UNSUPPORTED_CAPABILITY` | 协议版本或 MCP 等能力不满足 | 使用兼容 ACP v1 的官方 server；不只修改版本号就假定厂商扩展兼容。 |
 | `AGY_IMAGE_UNAVAILABLE` / `AGY_INVALID_IMAGE` | 附件服务 / image capability 不在场，或附件引用不一致 | 重新连接检查能力与附件；不要将文字描述误当已发送图片像素。 |
 | `AGY_BRIDGE_INVALID_ARGUMENTS` | 参数别名修正后仍缺必填键 | 按错误中签名补齐；模糊别名不由桥猜测。 |

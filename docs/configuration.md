@@ -2,14 +2,12 @@
 
 [返回主页](../README.md) · [使用与排障](reference.md) · [开发与验证](development.md)
 
-以下对应 **0.1.38**，以 [`src/settings.ts`](https://github.com/KouzakiUmi/dsh-antigravity-acp/blob/main/src/settings.ts) 的 Config 为准。字段均位于 `llm-antigravity-acp` 插件配置根级，不需要额外包装一层对象。设置页提供即时（volatile）字段与模型控制；`proxyBypass` 不提供界面控制项，并发 / 二进制 / 超时等普通配置在普通配置编辑器里修改。
+以下对应 **0.1.38**，以 [`src/settings.ts`](https://github.com/KouzakiUmi/dsh-antigravity-acp/blob/main/src/settings.ts) 的 Config 为准。字段均位于 `llm-antigravity-acp` 插件配置根级，不需要额外包装一层对象。设置页提供即时（volatile）字段与模型控制；`proxyBypass` 不提供界面控制项，二进制 / 超时等普通配置在普通配置编辑器里修改。
 
 ## 配置清单
 
 | 字段 | 默认值 | 作用与限制 |
 |---|---|---|
-| `maxConcurrentSessions` | `2` | 最大独立 worker 数，整数 1–4，按需启动。不是单个官方进程的多 session 开关，也不增加账户额度。 |
-| `queueTimeoutMs` | `120000` | 等待 worker 的上限（毫秒），最小 1000；队列最多 64 项，排队可取消。 |
 | `agyCliPath` | 未设置 | 官方 `agy` CLI 路径，优先于 `AGY_CLI_BIN`、PATH 与平台默认位置；刷新时重新探测。 |
 | `autoWarmup` | `true` | 加载插件时预热已有登录态与连接，不发送聊天 prompt，不主动弹浏览器授权；无登录态时预热报错，需手动「连接 / 登录 ACP」。设为 `false` 时改为只预读已缓存的官方 exe 到系统文件缓存。常驻一个官方进程约 170MB 内存。 |
 | `binaryPath` | 未设置 | 本地官方 ACP server 入口，优先级最高；指定但不存在会报错，不静默换来源。 |
@@ -36,8 +34,6 @@
 
 ```json
 {
-  "maxConcurrentSessions": 2,
-  "queueTimeoutMs": 120000,
   "autoWarmup": true,
   "autoDownload": true,
   "acpVersion": "1.4.0",
@@ -55,7 +51,7 @@ ACP 官方 agent 在同一会话内会保留上下文（2026-10-23 真机验证�
 - 注入内容按 producer 与内容去重：仅省略相同的快照/目录/指令或已见召回材料；首次出现、变化或恢复旧版本的状态仍发送。真实用户消息、notice、relay 与未知类别不去重。
 - 出现以下任一情况即受控重建（`session/close` + `session/new` + 全量重放）：历史不是已发送前缀的追加（压缩检查点、回退、编辑）、模型或思考强度变化、system 或工具目录变化、MCP 桥被另一对话接管、回合异常终止。
 - 标题、压缩等一次性请求不参与复用，各自独立建会话，结束后尽力关闭。内存会话与磁盘映射最多各保留 64 条，淘汰会话会关闭。
-- 连接池会把同一对话粘在同一个 worker 上（换 worker 就丢了会话记录）；新对话优先使用未被占用的 worker，容量用尽才排队。
+- 连接池会把同一对话粘在同一个 worker 上（换 worker 就丢了会话记录）。worker 按需启动、不设上限，不同对话不排队：新对话依次用没服务过对话的空闲 worker、官方进程已被回收的空闲 worker，都没有就新开一个，不接管别的对话正在复用的 worker。每个官方进程常驻约 170MB 内存，空闲 `idleRecycleMs` 后回收。已保存的 `maxConcurrentSessions`、`queueTimeoutMs` 配置会被忽略。
 - `resumeSessions` 同时验证路由、输入前缀和上轮输出；恢复后核对/校正实际模型。恢复失败先回收连接，再完整重建，避免迟到回放混入新轮。
 - 所有 worker 共用一个映射存储，串行提交且只修改本轮所属键。对话迁移到另一 worker 时保守新建会话，旧 worker 不能覆盖新游标。映射格式升级到 v2，旧格式自动失效并重建。
 - 跨 Host 使用 `sessions.lock` 排他租约。另一 Host 已占用缓存时，本实例不读写恢复映射，只保留内存复用并记录警告；普通聊天不受影响。正常卸载 flush 后释放租约。若 Host 崩溃留下锁，不按时间猜测过期；确认使用此缓存的所有 Host 均已退出后，才可人工移除残留锁。
@@ -91,7 +87,7 @@ ACP 官方 agent 在同一会话内会保留上下文（2026-10-23 真机验证�
 
 设置页字段通过宿主的即时配置引用保存：模型显示开关、显示名与映射随保存更新选择器，会话与进程偏好在下一轮聊天、预热或目录发现时读取，不打断正在输出或等待工具的回合。自动预热开关在下次启用插件时读取。代理和 CLI 路径用于后续请求及新启动的官方进程；已有 ACP 进程保留原启动环境，切换其出口仍需重新加载插件。
 
-并发、二进制（`binaryPath` / `autoDownload` / `acpVersion` / `extraArgs`）与各段超时（`requestTimeoutMs` / `handshakeTimeoutMs` / `authTimeoutMs` / `promptTimeoutMs` / `bridgeParkSettleMs` / `maxConcurrentSessions` / `queueTimeoutMs`）是**普通配置**：宿主只把即时（volatile）字段投影进设置文档，也会拒绝用 `mutate` 写这些路径。因此设置卡片不把它们做成输入框，只列出字段名作为指引；请在插件的普通配置编辑器里修改，保存后由宿主重载生效。
+二进制（`binaryPath` / `autoDownload` / `acpVersion` / `extraArgs`）与各段超时（`requestTimeoutMs` / `handshakeTimeoutMs` / `authTimeoutMs` / `promptTimeoutMs` / `bridgeParkSettleMs`）是**普通配置**：宿主只把即时（volatile）字段投影进设置文档，也会拒绝用 `mutate` 写这些路径。因此设置卡片不把它们做成输入框，只列出字段名作为指引；请在插件的普通配置编辑器里修改，保存后由宿主重载生效。
 
 工具回合尚未结束时保存偏好，其有效续轮以及不兼容续轮触发的 ACP prompt 重建仍沿用原回合快照；新值可能延至后续空闲新轮生效，不通过保存设置中断当前工具执行。
 

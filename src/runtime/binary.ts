@@ -531,6 +531,18 @@ export function mapNodePlatform(platform: NodeJS.Platform, arch: string): { plat
   return { platform: mappedPlatform, arch: mappedArch }
 }
 
+/**
+ * posix 下给解压目录里的每个文件补执行位：官方包除主程序外还带 helper（如 1.4.0 的
+ * localharness_external），zip 不保留权限位，helper 没有执行位运行时报 Permission denied。
+ */
+async function ensureExtractedExecutable(extractDir: string, executable: string, flavor: ExecutableFlavor): Promise<void> {
+  if (flavor === 'posix') {
+    const items = await readdir(extractDir, { recursive: true, withFileTypes: true })
+    await Promise.all(items.filter(item => item.isFile()).map(item => chmod(join(item.parentPath, item.name), 0o755)))
+  }
+  await ensureExecutable(executable, flavor)
+}
+
 /** posix 解压产物补执行位。 */
 export async function ensureExecutable(file: string, flavor: ExecutableFlavor): Promise<void> {
   if (flavor === 'posix') {
@@ -771,7 +783,7 @@ export async function ensureAgentBinary(options: AgentBinaryOptions = {}): Promi
   const { versionDir, extractDir } = versionCachePaths(cacheDir, version)
   const cached = await findExtractedExecutable(extractDir, flavor)
   if (cached) {
-    await ensureExecutable(cached, flavor)
+    await ensureExtractedExecutable(extractDir, cached, flavor)
     return { executablePath: cached, source: 'cache', version, checksumVerified: false }
   }
 
@@ -802,7 +814,7 @@ export async function ensureAgentBinary(options: AgentBinaryOptions = {}): Promi
       // 另一个宿主可能刚提交了同版本；不得删除它正在使用的完整产物。
       const winner = await findExtractedExecutable(finalExtract, flavor)
       if (winner) {
-        await ensureExecutable(winner, flavor)
+        await ensureExtractedExecutable(finalExtract, winner, flavor)
         return { executablePath: winner, source: 'cache', version, checksumVerified: false }
       }
       // 只有「目标已存在」这一类可自愈的失败才清掉旧目录重试：权限、跨设备
@@ -813,7 +825,7 @@ export async function ensureAgentBinary(options: AgentBinaryOptions = {}): Promi
       await rename(stagingExtract, finalExtract)
     }
     const executablePath = join(finalExtract, relative)
-    await ensureExecutable(executablePath, flavor)
+    await ensureExtractedExecutable(finalExtract, executablePath, flavor)
     return { executablePath, source: 'download', version, checksumVerified: false }
   } finally {
     // 失败/成功都要清掉暂存残渣（zip 临时文件与可能的半成品）。

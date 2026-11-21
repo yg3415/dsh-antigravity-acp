@@ -426,7 +426,7 @@ describe('settings card with real React state and effects', () => {
     const fields = liveKeys.filter(key => key !== 'modelOverrides' && key !== 'proxyBypass')
     // 普通（非 volatile）配置：宿主既不投影也不接受写入，不能出现在可编辑控件里。
     const plainFields = Object.keys(Config.dict ?? {}).filter(key => !liveKeys.includes(key))
-    expect(plainFields).toEqual(expect.arrayContaining(['binaryPath', 'autoDownload', 'acpVersion', 'extraArgs', 'maxConcurrentSessions', 'queueTimeoutMs', 'requestTimeoutMs', 'handshakeTimeoutMs', 'authTimeoutMs', 'promptTimeoutMs', 'bridgeParkSettleMs']))
+    expect(plainFields).toEqual(expect.arrayContaining(['binaryPath', 'autoDownload', 'acpVersion', 'extraArgs', 'requestTimeoutMs', 'handshakeTimeoutMs', 'authTimeoutMs', 'promptTimeoutMs', 'bridgeParkSettleMs']))
     expect(fields).not.toContain('proxyBypass')
     const values = liveHostConfig(Config({ autoWarmup: false }))
     const projected: Record<string, unknown> = Object.fromEntries(fields.map(key => [key, Reflect.get(values, key)]))
@@ -450,8 +450,8 @@ describe('settings card with real React state and effects', () => {
     expect(inputs.every(input => input.props.disabled === false)).toBe(true)
     // 普通配置一个都不该变成输入框（否则保存必然被宿主拒绝）。
     for (const key of plainFields) expect(renderer.root.findAllByProps({ name: key })).toHaveLength(0)
-    expect(renderedText(renderer)).toContain('普通配置（并发 / 二进制 / 超时）')
-    expect(renderedText(renderer)).toContain('maxConcurrentSessions')
+    expect(renderedText(renderer)).toContain('普通配置（二进制 / 超时）')
+    expect(renderedText(renderer)).toContain('requestTimeoutMs')
     await act(async () => {
       for (const input of inputs) input.props.onChange({ target: input.props.type === 'checkbox'
         ? { checked: !input.props.checked }
@@ -715,7 +715,7 @@ describe('settings card with real React state and effects', () => {
   it('displays pool pressure and clears subscriptions and polling on unmount', async () => {
     const service = transport()
     const control = vi.fn(async (method: string) => method === 'account'
-      ? { state: 'connected', message: 'ready', runtime: { phase: 'prompt', queue: { active: 2, parked: 1, waiting: 3, workers: 2, capacity: 2 } } }
+      ? { state: 'connected', message: 'ready', runtime: { phase: 'prompt', queue: { active: 2, parked: 1, waiting: 3, workers: 2 } } }
       : { status: 'ok', models: [] })
     const { renderer, intervals } = await mount(service.remote, control)
     expect(renderedText(renderer)).toContain('运行 2 · 等待工具 1 · 排队 3')

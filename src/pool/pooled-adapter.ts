@@ -35,8 +35,6 @@ export class PooledAcpAdapter extends LlmAdapter {
   private readonly affinity = new Map<string, number>()
   private closed = false
   private poll?: ReturnType<typeof setInterval>
-  private readonly capacity: number
-  private readonly queueTimeoutMs: number
   private readonly readSessionAffinity: () => boolean
   private get sessionAffinity(): boolean { return this.readSessionAffinity() }
   private preparation?: Promise<void>
@@ -46,10 +44,9 @@ export class PooledAcpAdapter extends LlmAdapter {
   private preparationGeneration = 0
   private disposal?: Promise<void>
 
-  constructor(private readonly create: () => AcpWorker, options: { capacity?: number; queueTimeoutMs?: number; sessionAffinity?: boolean | (() => boolean) } = {}) {
+  /** worker 不设上限：不同对话总能各自拿到一个 worker 同时生成，不排队。 */
+  constructor(private readonly create: () => AcpWorker, options: { sessionAffinity?: boolean | (() => boolean) } = {}) {
     super()
-    this.capacity = Math.max(1, Math.min(4, Math.floor(options.capacity ?? 2)))
-    this.queueTimeoutMs = Math.max(1_000, options.queueTimeoutMs ?? 120_000)
     const affinity = options.sessionAffinity ?? true
     this.readSessionAffinity = typeof affinity === 'function' ? affinity : () => affinity
     this.addSlot()
@@ -163,7 +160,6 @@ export class PooledAcpAdapter extends LlmAdapter {
       queue: {
         active: this.slots.filter(s => s.leased).length,
         waiting: this.waiters.length,
-        capacity: this.capacity,
         workers: rows.filter(r => r.processRunning).length,
         parked: this.slots.filter(s => !s.leased && s.worker.adapter.busy).length,
       },
@@ -230,19 +226,16 @@ export class PooledAcpAdapter extends LlmAdapter {
       if (pinned && !pinned.leased && !pinned.worker.adapter.busy) return pinned
     }
     const free = this.slots.filter(s => !s.leased && !s.worker.adapter.busy)
-    if (free.length > 0) {
-      // 开启会话粘性时，新对话优先用没服务过任何对话的 worker；都在服务过时，
-      // 容量允许就先扩容——避免已有对话的复用会话被顺手接管。关闭粘性时保持
-      // 旧的纯负载调度（不额外 spawn）。
-      if (affinityKey !== undefined) {
-        const unbound = free.find(s => s.lastOwner === undefined)
-        if (unbound) return unbound
-        if (this.slots.length < this.capacity) return this.addSlot()
-      }
-      return free[0]
+    // 开启会话粘性时，新对话优先用没服务过任何对话的 worker，其次用官方进程已回收
+    // 的 worker（上面已没有可复用的 ACP 会话），都没有就新开——不接管别的对话
+    // 正在复用的 worker。槽位数因此不超过同时活着的官方进程数的峰值。关闭粘性时
+    // 先用任意空闲 worker。
+    if (affinityKey !== undefined) {
+      return free.find(s => s.lastOwner === undefined)
+        ?? free.find(s => !s.worker.read().processRunning)
+        ?? this.addSlot()
     }
-    if (this.slots.length < this.capacity) return this.addSlot()
-    return undefined
+    return free[0] ?? this.addSlot()
   }
 
   private acquire(options: AdapterRequestOptions | undefined, signal?: AbortSignal): Promise<Slot> {
@@ -253,7 +246,6 @@ export class PooledAcpAdapter extends LlmAdapter {
       && s.owner.sessionId === options.sessionId
       && (s.owner.purpose === options.purpose || options.purpose === 'compaction'))
     if (owner) { owner.leased = true; return Promise.resolve(owner) }
-    if (this.waiters.length >= 64) return Promise.reject(llmError('ACP 等待队列已满，请稍后重试', 'AGY_QUEUE_FULL'))
     return new Promise((resolve, reject) => {
       const remove = (error: LlmError): void => {
         const index = this.waiters.indexOf(waiter)
@@ -264,8 +256,7 @@ export class PooledAcpAdapter extends LlmAdapter {
         this.dispatch()
       }
       const abort = (): void => remove(llmError('ACP 请求在等待连接时已取消', AGY_TURN_ERROR.ABORTED))
-      const timer = setTimeout(() => remove(llmError('ACP 连接繁忙，等待超时；请完成其他对话的工具审批或稍后重试', 'AGY_QUEUE_TIMEOUT')), this.queueTimeoutMs)
-      const waiter: Waiter = { options, resolve, reject, cleanup: () => { clearTimeout(timer); signal?.removeEventListener('abort', abort) } }
+      const waiter: Waiter = { options, resolve, reject, cleanup: () => signal?.removeEventListener('abort', abort) }
       signal?.addEventListener('abort', abort, { once: true })
       this.waiters.push(waiter)
       if (signal?.aborted) abort()

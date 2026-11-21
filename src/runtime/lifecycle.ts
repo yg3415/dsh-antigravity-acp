@@ -22,7 +22,7 @@ export interface AcpLifecycleSnapshot {
   }
   error?: string
   /** Shared provider scheduler state. No session identifiers or content leave the host. */
-  queue?: { active: number; waiting: number; capacity: number; workers: number; parked: number }
+  queue?: { active: number; waiting: number; workers: number; parked: number }
   modelCatalogRevision?: number
 }
 

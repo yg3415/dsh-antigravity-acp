@@ -729,6 +729,9 @@ export function officialAgentEnv(options: {
     if (value) env[key] = value
   }
   if (!env.SystemRoot && process.platform === 'win32') env.SystemRoot = 'C:\\Windows'
+  // 插件把登录态备在 ~/.gemini/antigravity-acp/acp_token.json。官方 server 1.4.0 在
+  // macOS 上不设这个变量就改读钥匙串，读不到便拉起浏览器登录、session/new 超时。
+  env.AGY_ACP_FORCE_FILE_STORAGE = '1'
   // 代理放在最后合并：用户配置优先；未配置时转发宿主自身的代理环境，避免出现
   // 「宿主走代理、官方进程直连」的分裂路由（本机直连 Google 不通）。
   Object.assign(env, options.proxy ? buildProxyEnv(options.proxy) : ambientProxyEnv(parent))

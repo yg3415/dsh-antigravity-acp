@@ -301,7 +301,7 @@ describe('apply wiring with real pool and SettingsControl', () => {
 
   it('registers the pool and releases all worker resources and the shared fetch on unload', async () => {
     const instance = harness()
-    apply(instance.ctx, { maxConcurrentSessions: 2 })
+    apply(instance.ctx, {})
     const pool = instance.registered()
     expect(pool).toBeInstanceOf(PooledAcpAdapter)
     const a = pool.stream(request('a'))

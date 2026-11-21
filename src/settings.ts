@@ -19,10 +19,6 @@ export interface ModelOverride {
 }
 
 export interface AntigravityHostConfig {
-  /** Maximum independent ACP workers, started on demand. */
-  maxConcurrentSessions?: number
-  /** Maximum wait for an available worker. */
-  queueTimeoutMs?: number
   /** Explicit official CLI path, re-detected for manual reads. */
   agyCliPath?: string
   /** 插件启用时提前启动 ACP 连接并保留给聊天使用；不发送模型消息。 */
@@ -157,8 +153,6 @@ const ModelOverrideSchema = Schema.object({
 })
 
 export const Config = Schema.object({
-  maxConcurrentSessions: Schema.natural().min(1).max(4).default(2).description('最大并发 ACP 连接数（1–4），按需启动；不同对话互不占用工具审批回合'),
-  queueTimeoutMs: Schema.natural().min(1000).default(120000).description('等待空闲 ACP 连接的最长时间（毫秒），排队期间可取消'),
   agyCliPath: Schema.string().volatile().description('官方 agy CLI 路径；留空依次查 AGY_CLI_BIN、PATH 和默认安装目录'),
   autoWarmup: Schema.boolean().default(true).volatile().description('插件启用时预热并保留 ACP 连接，减少首次聊天启动等待；复用本机登录态，不发送模型消息'),
   binaryPath: Schema.string().description('官方 agy-acp-server 可执行文件路径；留空则按 AGY_ACP_BIN → 缓存 → 自动下载解析'),

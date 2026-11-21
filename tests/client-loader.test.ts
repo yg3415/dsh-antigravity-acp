@@ -259,9 +259,12 @@ describe('browser client module', () => {
     expect(text).not.toContain('默认模型')
     expect(text).not.toContain('套餐额度管理')
     expect(elements(tree).filter((item) => item.props['aria-label'] === 'AI Credits 余额')).toHaveLength(0)
-    // 普通配置（并发/二进制/超时）不是即时字段，宿主拒绝在本卡片写入，改为指引块。
-    expect(text).toContain('普通配置（并发 / 二进制 / 超时）')
-    expect(text).toContain('maxConcurrentSessions')
+    // 普通配置（二进制/超时）不是即时字段，宿主拒绝在本卡片写入，改为指引块。
+    expect(text).toContain('普通配置（二进制 / 超时）')
+    expect(text).toContain('requestTimeoutMs')
+    // 需求 1019：并发不设上限，不再列并发上限和排队超时。
+    expect(text).not.toContain('maxConcurrentSessions')
+    expect(text).not.toContain('queueTimeoutMs')
     expect(elements(tree).filter((item) => item.type === 'details')).toHaveLength(3)
   })
 

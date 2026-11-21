@@ -44,7 +44,7 @@ window.__ModuleLoader__.load({
     ]
 
     /**
-     * 普通（非 volatile）配置：并发、二进制与各段超时。
+     * 普通（非 volatile）配置：二进制与各段超时。
      *
      * 宿主只把 volatile 字段投影进 `settings.describe()`，并拒绝用 `mutate` 写非
      * volatile 路径（`Config field "X" is not volatile`）。把它们渲染成可编辑输入
@@ -52,8 +52,6 @@ window.__ModuleLoader__.load({
      * 修改走插件的普通配置编辑器，保存后由宿主重载生效。
      */
     const PLAIN_FIELD_LABELS = [
-      msg('最大 ACP 连接数（maxConcurrentSessions）'),
-      msg('连接排队超时（queueTimeoutMs）'),
       msg('普通请求超时（requestTimeoutMs）'),
       msg('握手超时（handshakeTimeoutMs）'),
       msg('浏览器登录超时（authTimeoutMs）'),
@@ -185,7 +183,7 @@ window.__ModuleLoader__.load({
       return h('div', { 'aria-label': t('ACP 生命周期与计时'), style: { display: 'grid', gap: '8px', fontSize: '12px', lineHeight: 1.5 } },
         row(t('当前状态'), phaseName(runtime.phase) + ' · ' + duration(runtime.phaseElapsedMs)),
         queue ? row(t('会话调度'), t('运行 {active} · 等待工具 {parked} · 排队 {waiting}', queue)) : null,
-        queue ? row(t('并发连接'), queue.workers + ' / ' + queue.capacity) : null,
+        queue ? row(t('并发连接'), String(queue.workers)) : null,
         runtime.processRunning ? row(t('进程已运行'), duration(runtime.uptimeMs)) : null,
         row(t('进程统计'), t('启动 {starts} · 复用 {reuses} · 回收 {recycles}', runtime)),
         runtime.startup ? row(t('最近启动总耗时'), duration(runtime.startup.elapsedMs)) : null,
@@ -758,7 +756,7 @@ window.__ModuleLoader__.load({
           h(SettingsGroup, { title: t('网络与 CLI'), fields: fieldsFor('network'), fieldProps, open: effectiveProxyMode }),
           !effectiveProxyMode ? h(SettingsGroup, { title: t('会话与进程'), fields: fieldsFor('advanced'), fieldProps }) : null,
           !effectiveProxyMode ? h('div', { style: { ...PANEL, padding: '12px 14px', fontSize: '11px', lineHeight: 1.6 }, 'aria-label': t('普通配置说明') },
-            h('strong', { style: { display: 'block', fontSize: '13px', marginBottom: '4px' } }, t('普通配置（并发 / 二进制 / 超时）')),
+            h('strong', { style: { display: 'block', fontSize: '13px', marginBottom: '4px' } }, t('普通配置（二进制 / 超时）')),
             h('div', { style: { opacity: .75 } }, t('这些不是即时配置：宿主只把即时字段投影到本卡片，也会拒绝在这里写入普通字段。请在插件的普通配置编辑器里修改，保存后由宿主重载生效。字段清单：')),
             h('ul', { style: { margin: '5px 0 0', paddingLeft: '18px', opacity: .75 } },
               ...PLAIN_FIELD_LABELS.map((label) => h('li', { key: label }, t(label))))) : null,

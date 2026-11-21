@@ -85,7 +85,7 @@ class FakeWorker implements AcpWorker {
 const owners = new WeakMap<AcpWorker['adapter'], FakeWorker>()
 function owner(adapter: AcpWorker['adapter']): FakeWorker { return owners.get(adapter)! }
 const pools: PooledAcpAdapter[] = []
-function setup(options: { capacity?: number; queueTimeoutMs?: number; ensureImages?: AcpWorker['ensureImages'] } = {}) {
+function setup(options: { ensureImages?: AcpWorker['ensureImages'] } = {}) {
   const { ensureImages, ...poolOptions } = options
   const workers: FakeWorker[] = []
   const pool = new PooledAcpAdapter(() => {
@@ -118,7 +118,7 @@ afterEach(async () => {
 
 describe('会话粘性（ACP 会话复用需要同一 worker）', () => {
   it('a later round of the same session returns to its worker, new sessions take other workers', async () => {
-    const { pool, workers } = setup({ capacity: 2 })
+    const { pool, workers } = setup()
     const a1 = run(pool, request('s1'))
     await flush()
     workers[0]!.calls[0]!.complete('finish')
@@ -139,35 +139,30 @@ describe('会话粘性（ACP 会话复用需要同一 worker）', () => {
     await a2
   })
 
-  it('falls back to another worker instead of queueing behind an unrelated conversation', async () => {
-    const { pool, workers } = setup({ capacity: 2 })
+  it('falls back to another worker instead of queueing behind an unrelated request', async () => {
+    const { pool, workers } = setup()
     const a1 = run(pool, request('s1'))
     await flush()
     workers[0]!.calls[0]!.complete('finish')
     await a1
-    const c1 = run(pool, request('s3'))
+    // 标题请求不参与粘性，落在空闲的 worker0 上。
+    const title = run(pool, request('title', { purpose: 'session-title' }))
     await flush()
-    workers[1]!.calls[0]!.complete('finish')
-    await c1
+    expect(workers[0]!.calls[1]!.options.sessionId).toBe('title')
 
-    // s2 借用 s1 原来的 worker0（容量已满、两者都空闲）。
-    const b1 = run(pool, request('s2'))
-    await flush()
-    expect(workers[0]!.calls.length).toBe(2)
-
-    // s1 回来时只死等自己的 worker 会卡住；应改落到空闲的 worker1。
+    // s1 回来时自己的 worker 被占着：不等它，另开一个。
     const a2 = run(pool, request('s1'))
     await flush()
     expect(pool.read().queue?.waiting).toBe(0)
-    expect(workers[1]!.calls.length).toBe(2)
-    workers[1]!.calls[1]!.complete('finish')
+    expect(workers[1]!.calls.map(call => call.options.sessionId)).toEqual(['s1'])
+    workers[1]!.calls[0]!.complete('finish')
     await a2
     workers[0]!.calls[1]!.complete('finish')
-    await b1
+    await title
   })
 
   it('title requests do not claim affinity', async () => {
-    const { pool, workers } = setup({ capacity: 2 })
+    const { pool, workers } = setup()
     const a1 = run(pool, request('s1'))
     await flush()
     workers[0]!.calls[0]!.complete('finish')
@@ -218,25 +213,6 @@ describe('PooledAcpAdapter scheduling with independent fake workers', () => {
     await b
   })
 
-  it('runs different sessions concurrently up to capacity and queues the third', async () => {
-    const { pool, workers } = setup({ capacity: 2 })
-    const a = run(pool, request('a'))
-    const b = run(pool, request('b'))
-    const c = run(pool, request('c'))
-    await flush()
-    expect(workers).toHaveLength(2)
-    expect(workers.map(w => w.calls.length)).toEqual([1, 1])
-    expect(pool.read().queue).toMatchObject({ active: 2, waiting: 1, capacity: 2, workers: 2 })
-    workers[0]!.calls[0]!.complete('finish')
-    await a
-    await flush()
-    expect(workers[0]!.calls[1]!.options.sessionId).toBe('c')
-    workers[0]!.calls[1]!.complete('finish')
-    workers[1]!.calls[0]!.complete('finish')
-    await Promise.all([b, c])
-    expect(pool.read().queue).toMatchObject({ active: 0, waiting: 0, parked: 0 })
-  })
-
   it('routes a parked owner back to its worker while another session continues', async () => {
     const { pool, workers } = setup()
     const a = run(pool, request('a'))
@@ -268,65 +244,18 @@ describe('PooledAcpAdapter scheduling with independent fake workers', () => {
     await second
   })
 
-  it('prioritizes foreground work over a title already queued', async () => {
-    const { pool, workers } = setup({ capacity: 1 })
-    const busy = run(pool, request('busy'))
-    const title = run(pool, request('title', { purpose: 'session-title' }))
-    const chat = run(pool, request('chat'))
-    await flush()
-    workers[0]!.calls[0]!.complete('finish')
-    await busy
-    await flush()
-    expect(workers[0]!.calls[1]!.options.sessionId).toBe('chat')
-    workers[0]!.calls[1]!.complete('finish')
-    await chat
-    await flush()
-    expect(workers[0]!.calls[2]!.options.purpose).toBe('session-title')
-    workers[0]!.calls[2]!.complete('finish')
-    await title
-  })
-
-  it('rejects a full queue but still accepts the parked owner needed to release it', async () => {
-    const { pool, workers } = setup({ capacity: 1 })
-    const first = run(pool, request('owner'))
-    await flush()
-    workers[0]!.calls[0]!.complete('park')
-    await first
-    const waiting = Array.from({ length: 64 }, (_, i) => outcome(run(pool, request(`queued-${i}`))))
-    const rejected = await outcome(run(pool, request('overflow')))
-    expect(rejected).toMatchObject({ ok: false, error: { code: 'AGY_QUEUE_FULL' } })
-    const resumed = outcome(run(pool, request('owner')))
-    await flush()
-    expect(workers[0]!.calls[1]?.options.sessionId).toBe('owner')
-    workers[0]!.calls[1]?.complete('finish')
-    expect((await resumed).ok).toBe(true)
-    await pool.dispose()
-    await Promise.all(waiting)
-  })
-
-  it('times out waiting requests without disturbing the active worker', async () => {
-    vi.useFakeTimers()
-    const { pool, workers } = setup({ capacity: 1, queueTimeoutMs: 1_000 })
-    const active = run(pool, request('active'))
-    const waiting = outcome(run(pool, request('waiting')))
-    await flush()
-    await vi.advanceTimersByTimeAsync(1_001)
-    expect(await waiting).toMatchObject({ ok: false, error: { code: 'AGY_QUEUE_TIMEOUT' } })
-    expect(workers[0]!.calls).toHaveLength(1)
-    expect(pool.read().queue).toMatchObject({ active: 1, waiting: 0 })
-    workers[0]!.calls[0]!.complete('finish')
-    await active
-  })
-
   it('honors abort before queueing and while waiting without starting the request', async () => {
-    const { pool, workers } = setup({ capacity: 1 })
+    const { pool, workers } = setup()
     const active = run(pool, request('active'))
     const already = new AbortController()
     already.abort()
     // 对外契约钉字面量：不能因为实现与测试引用同一常量，就把码字改坏也测不出来。
     expect(await outcome(run(pool, request('already', { signal: already.signal })))).toMatchObject({ ok: false, error: { code: 'AGY_ABORTED' } })
+    // 只有同一个对话的重叠请求会等（ACP 会话状态在 worker 里，不能并行）。
     const controller = new AbortController()
-    const waiting = outcome(run(pool, request('waiting', { signal: controller.signal })))
+    const waiting = outcome(run(pool, request('active', { signal: controller.signal })))
+    await flush()
+    expect(pool.read().queue?.waiting).toBe(1)
     controller.abort()
     expect(await waiting).toMatchObject({ ok: false, error: { code: 'AGY_ABORTED' } })
     expect(pool.read().queue?.waiting).toBe(0)
@@ -339,8 +268,9 @@ describe('PooledAcpAdapter scheduling with independent fake workers', () => {
     const { pool, workers } = setup()
     const a = outcome(run(pool, request('a')))
     const b = outcome(run(pool, request('b')))
-    const waiting = outcome(run(pool, request('waiting')))
+    const waiting = outcome(run(pool, request('a')))
     await flush()
+    expect(pool.read().queue?.waiting).toBe(1)
     await pool.dispose()
     expect(await waiting).toMatchObject({ ok: false, error: { code: 'AGY_LINK_CLOSED' } })
     expect(await outcome(run(pool, request('later')))).toMatchObject({ ok: false, error: { code: 'AGY_LINK_CLOSED' } })
@@ -390,7 +320,7 @@ describe('PooledAcpAdapter scheduling with independent fake workers', () => {
 
   it('图片请求只准备实际承载的 worker，文本请求不新增握手', async () => {
     const ensureImages = vi.fn(async () => undefined)
-    const { pool, workers } = setup({ capacity: 2, ensureImages })
+    const { pool, workers } = setup({ ensureImages })
     const a = run(pool, request('a'))
     await flush()
     const ref: ImageAttachmentRef = { attachmentId: AttachmentId('sha256:image'), mediaType: 'image/png', bytes: 1, width: 1, height: 1 }
@@ -406,7 +336,7 @@ describe('PooledAcpAdapter scheduling with independent fake workers', () => {
   it('图片准备失败后归还 worker，下一次文本请求仍可调度', async () => {
     const failure = new Error('capability handshake failed')
     const ensureImages = vi.fn(async () => { throw failure })
-    const { pool, workers } = setup({ capacity: 1, ensureImages })
+    const { pool, workers } = setup({ ensureImages })
     const ref: ImageAttachmentRef = { attachmentId: AttachmentId('sha256:image'), mediaType: 'image/png', bytes: 1, width: 1, height: 1 }
     await expect(outcome(run(pool, request('image', { messages: [createUserMessage({ content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } })] }))))
       .resolves.toMatchObject({ ok: false, error: failure })
@@ -432,19 +362,18 @@ describe('PooledAcpAdapter scheduling with independent fake workers', () => {
     expect(workers[0]!.adapter.prepareCall).toHaveBeenCalledTimes(1)
   })
 
-  it('reserves a worker for warmup and queues chat until preparation finishes', async () => {
-    const { pool, workers } = setup({ capacity: 1 })
+  it('预热占着 worker 时，聊天另开 worker 立即开始', async () => {
+    const { pool, workers } = setup()
     workers[0]!.warmupGate = deferred<void>()
     const warmup = pool.warmup()
     const chat = run(pool, request('chat'))
     await flush()
     expect(workers[0]!.adapter.warmup).toHaveBeenCalledTimes(1)
-    expect(workers[0]!.calls).toHaveLength(0)
-    expect(pool.read().queue).toMatchObject({ active: 1, waiting: 1 })
+    expect(workers[1]!.calls.map(call => call.options.sessionId)).toEqual(['chat'])
+    expect(pool.read().queue).toMatchObject({ active: 2, waiting: 0 })
     workers[0]!.warmupGate.resolve()
     await warmup
-    await flush()
-    workers[0]!.calls[0]!.complete('finish')
+    workers[1]!.calls[0]!.complete('finish')
     await chat
   })
 
@@ -462,22 +391,20 @@ describe('PooledAcpAdapter scheduling with independent fake workers', () => {
     await chat
   })
 
-  it('queues discovery instead of interrupting a parked owner', async () => {
-    const { pool, workers } = setup({ capacity: 1 })
+  it('runs discovery on another worker instead of interrupting a parked owner', async () => {
+    const { pool, workers } = setup()
     const first = run(pool, request('owner'))
     await flush()
     workers[0]!.calls[0]!.complete('park')
     await first
-    const discovery = pool.discoverModels()
-    await flush()
+    await pool.discoverModels()
     expect(workers[0]!.adapter.discoverModels).not.toHaveBeenCalled()
+    expect(workers[1]!.adapter.discoverModels).toHaveBeenCalledTimes(1)
     const resumed = run(pool, request('owner', { purpose: 'compaction' }))
     await flush()
     expect(workers[0]!.calls[1]?.options.purpose).toBe('compaction')
     workers[0]!.calls[1]!.complete('finish')
     await resumed
-    await discovery
-    expect(workers[0]!.adapter.discoverModels).toHaveBeenCalledTimes(1)
   })
 
   it('shares initial capability preparation and dispatches the prepared call through the pool', async () => {

@@ -19,6 +19,7 @@ import {
   QuotaError,
 } from '../src/runtime/quota.js'
 import type { QuotaDeps, QuotaSnapshot } from '../src/runtime/quota.js'
+import { cliQuotaIdentity, quotaIdentity } from '../src/quota/snapshot-store.js'
 import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET } from '@cortexkit/antigravity-auth-core'
 
 const CLIENT_ID = ['1234567890', '-abcdef.apps.googleusercontent.com'].join('')
@@ -350,6 +351,42 @@ describe('fetchQuotaSnapshot 链路', () => {
     expect(snapshot.status).toBe('error')
     expect(snapshot.error?.code).toBe('token-missing')
     expect(calls).toHaveLength(0)
+  })
+
+  it('没有官方 CLI 登录态文件时改用 ACP 的 acp_token.json 取数，换发用该文件里的 client', async () => {
+    const acpClientId = ['9876543210', '-acpclient.apps.googleusercontent.com'].join('')
+    const acpClientSecret = ['GOCSPX-', 'AcpSecretValue0123456789ab'].join('')
+    const file = memoryTokenFile({
+      client_id: acpClientId,
+      client_secret: acpClientSecret,
+      refresh_token: REFRESH_TOKEN,
+      token_uri: OAUTH_TOKEN_URL,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      project_id: 'proj-1',
+    }, ['antigravity-acp', 'acp_token.json'])
+    const { fetchImpl, calls } = fakeFetch(quotaRoutes([
+      { match: (url) => url === OAUTH_TOKEN_URL, respond: () => json({ access_token: 'fresh-token', expires_in: 3600 }) },
+    ]))
+    const snapshot = await fetchQuotaSnapshot({}, {
+      ...file.deps,
+      fetchImpl,
+      env: {},
+      binaryPaths: [],
+      now: () => Date.parse('2026-10-16T00:00:00Z'),
+    })
+    expect(snapshot.status).toBe('ok')
+    expect(snapshot.plan).toBe('Ultra')
+    const refresh = at(calls, 0)
+    expect(refresh.url).toBe(OAUTH_TOKEN_URL)
+    expect(new URLSearchParams(refresh.body).get('client_id')).toBe(acpClientId)
+    expect(at(calls, 1).authorization).toBe('Bearer fresh-token')
+  })
+
+  it('没有官方 CLI 登录态文件时，额度快照身份取自 acp_token.json 的 refresh_token', async () => {
+    const file = memoryTokenFile({
+      client_id: CLIENT_ID, client_secret: CLIENT_SECRET, refresh_token: REFRESH_TOKEN, token_uri: OAUTH_TOKEN_URL,
+    }, ['antigravity-acp', 'acp_token.json'])
+    expect(await cliQuotaIdentity(file.deps)).toBe(quotaIdentity(REFRESH_TOKEN))
   })
 
   it('过期且拿不到 OAuth client 元数据时报 refresh-unavailable（不编造 client）', async () => {

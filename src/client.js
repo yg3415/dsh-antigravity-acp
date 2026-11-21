@@ -1245,7 +1245,10 @@ window.__ModuleLoader__.load({
       name: 'dsh-bundle-antigravity-host',
       // remote.settings / remote.llm 必须逐个声明：remote 各命名空间是独立服务，
       // 漏声明会在读取属性时抛「without inject」并击穿 settings.section 卡片。
-      inject: ['slots', 'remote', 'remote.settings', 'remote.llm'],
+      // remote.session：药丸槽位注入调用 modelDirectories.directoryFor，宿主服务以
+      // 调用方（本插件）上下文读取 `ctx.remote.session`；药丸先于模型选择器首次建
+      // 会话目录时（如 390 手机），漏声明会抛「without inject」击穿整个会话面板。
+      inject: ['slots', 'remote', 'remote.settings', 'remote.llm', 'remote.session'],
       apply(ctx) {
         ctx.effect(() => {
           if (typeof document === 'undefined' || !document.head || !document.createElement) return () => {}

@@ -18,6 +18,7 @@ interface WorkerStub {
   close: Mock
   prepareCall: Mock
   discoverModels: Mock
+  finish?: () => void
 }
 
 const external = vi.hoisted(() => ({
@@ -356,43 +357,203 @@ describe('apply wiring with real pool and SettingsControl', () => {
   })
 })
 
-describe('需求 1020：apply 接线（重启后接着做）', () => {
+describe('需求 1020：dsh 重启后接着做（经 apply 与池入口）', () => {
+  const RESTART = Symbol.for('dsh-antigravity-acp.restartResume')
   const busyPath = () => join(external.cacheDir, 'busy.json')
-  const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(resolve => setImmediate(resolve)) }
+  const readBusy = async (): Promise<unknown> => JSON.parse(await readFile(busyPath(), 'utf8'))
+  const busyBecomes = (ids: string[]) => vi.waitFor(async () => expect(await readBusy()).toEqual(ids))
+  const header = (provider: string) => ({ type: 'request/header', data: { header: { config: { provider, model: 'gemini-4-argon' } } } })
+  const turnEnd = (reason: unknown) => ({ type: 'turn/end', data: { turn: 1, reason } })
+  type FakeAgent = { followup: Mock; status: 'idle' | 'running' }
+
+  /** dsh 服务（sessionController、agents、goals、subagents）的假实现，形状照 dsh 0.2.1。 */
+  function dsh(sessions: Record<string, { events: unknown[]; origin?: 'subagent'; parentSession?: string }>) {
+    const agents = new Map<string, FakeAgent>()
+    const agentFor = (id: string) => {
+      let agent = agents.get(id)
+      if (!agent) { agent = { followup: vi.fn(), status: 'idle' }; agents.set(id, agent) }
+      return agent
+    }
+    const deliver = vi.fn(async () => 'message-id')
+    const goals = new Map<FakeAgent, string>()
+    const loaded = new Map<string, FakeAgent>()
+    const services = {
+      sessionController: {
+        inspect: vi.fn(async (id: string) => {
+          const row = sessions[id]
+          if (!row) throw new Error(`session ${id} not found`)
+          return { meta: { id, version: 4, origin: row.origin, parentSession: row.parentSession }, events: row.events }
+        }),
+        resolveAgent: vi.fn(async (id: string) => sessions[id]?.origin === 'subagent' ? { error: new Error('owned by subagent routing') } : { agent: agentFor(id) }),
+      },
+      agents: { get: (id: string) => loaded.get(id) },
+      goals: { get: (agent: FakeAgent) => (goals.has(agent) ? { phase: goals.get(agent) } : undefined) },
+      subagents: { [Symbol.for('dsh.subagent.deliverPrompt')]: deliver },
+    }
+    return { services, agentFor, deliver, goals, loaded }
+  }
+
+  /** 一次 dsh 启动：装载插件、dsh 服务就绪、过了启动延时，等插件把重启续跑检查做完。 */
+  async function boot(fake: ReturnType<typeof dsh>, between?: (instance: ReturnType<typeof harness>) => Promise<void>) {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const instance = harness()
+    apply(instance.ctx, Config({}))
+    instance.offer(fake.services)
+    await vi.advanceTimersByTimeAsync(0)
+    await between?.(instance)
+    await vi.advanceTimersByTimeAsync(10_000)
+    vi.useRealTimers()
+    const info = (instance.ctx as unknown as { logger: { info: Mock } }).logger.info
+    await vi.waitFor(() => expect(info.mock.calls.some(([line]) => String(line).includes('重启续跑检查完成'))).toBe(true))
+    return instance
+  }
 
   it('需求 1020：经 ACP 路由服务一次主对话请求后会话记进 busy，正常结束的 turn/end 把它删掉；标题请求不记', async () => {
     const instance = harness()
     apply(instance.ctx, Config({}))
-    const turn = instance.registered().stream(request('session-main'))
-    void turn.next()
-    const title = instance.registered().stream({ ...request('session-title-only'), purpose: 'session-title' } as AdapterRequestOptions)
-    void title.next()
-    await vi.waitFor(async () => expect(JSON.parse(await readFile(busyPath(), 'utf8'))).toEqual(['session-main']))
-    instance.sessionEvent({ id: 'session-main' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
-    await vi.waitFor(async () => expect(JSON.parse(await readFile(busyPath(), 'utf8'))).toEqual([]))
-    for (const worker of external.workers) worker.options.lifecycle?.stopped()
+    void instance.registered().stream(request('session-main')).next()
+    void instance.registered().stream({ ...request('session-title-only'), purpose: 'session-title' } as AdapterRequestOptions).next()
+    await busyBecomes(['session-main'])
+    instance.sessionEvent({ id: 'session-main' }, turnEnd({ kind: 'completed' }))
+    await busyBecomes([])
+    for (const worker of external.workers) worker.finish?.()
   })
 
-  it('需求 1020：启动时 busy 文件里有会话：dsh 服务就绪、延时后给它发续跑通知并清空文件', async () => {
-    await writeFile(busyPath(), JSON.stringify(['session-cut']))
-    vi.useFakeTimers({ toFake: ['setTimeout'] })
+  it('需求 1020：prepareCall 返回的流同样记 busy；压缩请求不记', async () => {
     const instance = harness()
     apply(instance.ctx, Config({}))
-    const followup = vi.fn()
-    instance.offer({
-      sessionController: {
-        inspect: vi.fn(async () => ({ meta: { version: 4 }, events: [{ type: 'request/header', data: { header: { config: { provider: 'antigravity-acp' } } } }] })),
-        resolveAgent: vi.fn(async () => ({ agent: { followup, status: 'idle' } })),
-      },
-      agents: { get: () => undefined },
-      goals: { get: () => undefined },
+    const call = await instance.registered().prepareCall('antigravity-acp', 'example')
+    void call.stream({ ...request('session-compact'), purpose: 'compaction' } as AdapterRequestOptions)[Symbol.asyncIterator]().next()
+    void call.stream(request('session-prepared'))[Symbol.asyncIterator]().next()
+    await busyBecomes(['session-prepared'])
+    for (const worker of external.workers) worker.finish?.()
+  })
+
+  it('需求 1020：用户 Stop 和出错结束的轮把会话从 busy 里删掉，dsh 关停（aborted / disposed）和冷加载补的 interrupted 结束的轮保留', async () => {
+    const instance = harness()
+    apply(instance.ctx, Config({}))
+    for (const id of ['session-stop', 'session-error', 'session-disposed', 'session-interrupted']) void instance.registered().stream(request(id)).next()
+    await vi.waitFor(async () => expect(new Set(await readBusy() as string[]).size).toBe(4))
+    instance.sessionEvent({ id: 'session-stop' }, turnEnd({ kind: 'aborted', reason: { kind: 'user' } }))
+    instance.sessionEvent({ id: 'session-error' }, turnEnd({ kind: 'error', error: { message: 'x' } }))
+    instance.sessionEvent({ id: 'session-disposed' }, turnEnd({ kind: 'aborted', reason: { kind: 'disposed' } }))
+    instance.sessionEvent({ id: 'session-interrupted' }, turnEnd({ kind: 'interrupted' }))
+    await vi.waitFor(async () => expect(new Set(await readBusy() as string[])).toEqual(new Set(['session-disposed', 'session-interrupted'])))
+    for (const worker of external.workers) worker.finish?.()
+  })
+
+  it('需求 1020：启动时 busy 文件里有会话：延时前文件不动，延时后给它发续跑通知开一轮，并把它从文件里删掉', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-cut']))
+    const fake = dsh({ 'session-cut': { events: [header('antigravity-acp'), { type: 'turn/start', data: { turn: 1 } }] } })
+    await boot(fake, async () => {
+      // 延时内再重启一次也不丢：文件里还记着。
+      expect(await readBusy()).toEqual(['session-cut'])
+      expect(fake.agentFor('session-cut').followup).not.toHaveBeenCalled()
     })
-    await settle()
-    expect(followup).not.toHaveBeenCalled()
-    await vi.advanceTimersByTimeAsync(10_000)
-    vi.useRealTimers()
-    await vi.waitFor(() => expect(followup).toHaveBeenCalledTimes(1))
-    expect((followup.mock.calls[0]![0] as { content: Array<{ text: string }> }).content[0]!.text).toMatch(/dsh 重启打断了上一轮/)
-    expect(JSON.parse(await readFile(busyPath(), 'utf8'))).toEqual([])
+    const followup = fake.agentFor('session-cut').followup
+    expect(followup).toHaveBeenCalledTimes(1)
+    const message = followup.mock.calls[0]![0] as { role: string; content: Array<{ text: string }>; source: { kind: string } }
+    expect(message.role).toBe('user')
+    expect(message.source.kind).toBe('plugin:dsh-antigravity-acp')
+    const text = message.content[0]!.text
+    expect(text).toMatch(/dsh 重启打断了上一轮/)
+    expect(text).toMatch(/还没结束的工具调用已被停止，结果未知/)
+    expect(text).toMatch(/从被打断的地方接着做/)
+    expect(await readBusy()).toEqual([])
+  })
+
+  it('需求 1020：代理路由（antigravity-proxy）的会话同样续跑', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-proxy']))
+    const fake = dsh({ 'session-proxy': { events: [header('antigravity-proxy')] } })
+    await boot(fake)
+    expect(fake.agentFor('session-proxy').followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('需求 1020：busy 文件不存在或为空时不开轮', async () => {
+    const fake = dsh({})
+    await boot(fake)
+    delete (globalThis as Record<symbol, unknown>)[RESTART]
+    await writeFile(busyPath(), '[]')
+    await boot(fake)
+    expect(fake.services.sessionController.resolveAgent).not.toHaveBeenCalled()
+  })
+
+  it('需求 1020：延时内这一轮已经正常结束（用户手动继续并做完）的会话不再发通知', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-done']))
+    const fake = dsh({ 'session-done': { events: [header('antigravity-acp')] } })
+    await boot(fake, async (instance) => {
+      instance.sessionEvent({ id: 'session-done' }, turnEnd({ kind: 'completed' }))
+      await busyBecomes([])
+    })
+    expect(fake.agentFor('session-done').followup).not.toHaveBeenCalled()
+  })
+
+  it('需求 1020：最后一条 request/header 的 provider 不是本插件的两条路由时不发，并从 busy 里删掉', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-switched']))
+    const fake = dsh({ 'session-switched': { events: [header('antigravity-acp'), header('claude-code')] } })
+    await boot(fake)
+    expect(fake.agentFor('session-switched').followup).not.toHaveBeenCalled()
+    expect(await readBusy()).toEqual([])
+  })
+
+  it('需求 1020：inbox 里已有本插件还没被取走的续跑通知时不叠；已被一轮取走的照常发', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-pending', 'session-consumed']))
+    const spliced = { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [{ role: 'user', content: [{ type: 'text', text: '旧通知' }], source: { kind: 'plugin:dsh-antigravity-acp', form: 'notice' } }] } }
+    const fake = dsh({
+      'session-pending': { events: [header('antigravity-acp'), { type: 'turn/start', data: { turn: 1 } }, spliced] },
+      'session-consumed': { events: [header('antigravity-acp'), spliced, { type: 'turn/start', data: { turn: 2 } }] },
+    })
+    await boot(fake)
+    expect(fake.agentFor('session-pending').followup).not.toHaveBeenCalled()
+    expect(fake.agentFor('session-consumed').followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('需求 1020：没加载的子代理会话经父会话投递', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-child']))
+    const fake = dsh({
+      'session-child': { events: [header('antigravity-acp')], origin: 'subagent', parentSession: 'session-parent' },
+      'session-parent': { events: [header('claude-code')] },
+    })
+    await boot(fake)
+    expect(fake.deliver).toHaveBeenCalledTimes(1)
+    const [parent, childId, content, source, , delivery] = fake.deliver.mock.calls[0] as unknown as [unknown, string, Array<{ text: string }>, { kind: string }, AbortSignal, string]
+    expect(parent).toBe(fake.agentFor('session-parent'))
+    expect(childId).toBe('session-child')
+    expect(content[0]!.text).toMatch(/dsh 重启打断了上一轮/)
+    expect(source.kind).toBe('plugin:dsh-antigravity-acp')
+    expect(delivery).toBe('queue')
+    expect(fake.agentFor('session-parent').followup).not.toHaveBeenCalled()
+  })
+
+  it('需求 1020：会话有进行中的目标时通知用 user source', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-goal']))
+    const fake = dsh({ 'session-goal': { events: [header('antigravity-acp')] } })
+    fake.goals.set(fake.agentFor('session-goal'), 'active')
+    await boot(fake)
+    expect((fake.agentFor('session-goal').followup.mock.calls[0]![0] as { source: unknown }).source).toEqual({ kind: 'user' })
+  })
+
+  it('需求 1020：同一进程里再次装载插件（热重载）不读 busy 文件、不发通知', async () => {
+    const fake = dsh({ 'session-s': { events: [header('antigravity-acp')] } })
+    await boot(fake)
+    await writeFile(busyPath(), JSON.stringify(['session-s']))
+    const again = harness()
+    apply(again.ctx, Config({}))
+    again.offer(fake.services)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(fake.services.sessionController.inspect).not.toHaveBeenCalled()
+    expect(await readBusy()).toEqual(['session-s'])
+  })
+
+  it('需求 1020：会话已经有一轮在跑时不发、留在 busy 里；找不到的会话跳过，不影响其余会话', async () => {
+    await writeFile(busyPath(), JSON.stringify(['session-live', 'session-gone', 'session-s']))
+    const fake = dsh({ 'session-live': { events: [header('antigravity-acp')] }, 'session-s': { events: [header('antigravity-acp')] } })
+    const live = fake.agentFor('session-live')
+    live.status = 'running'
+    fake.loaded.set('session-live', live)
+    await boot(fake)
+    expect(live.followup).not.toHaveBeenCalled()
+    expect(fake.agentFor('session-s').followup).toHaveBeenCalledTimes(1)
+    expect(await readBusy()).toEqual(['session-live'])
   })
 })

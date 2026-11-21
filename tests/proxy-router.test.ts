@@ -3,6 +3,9 @@
  * 都只由同一个 `proxyMode` volatile 值驱动。
  */
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import type { ProxyModelCatalog } from '../src/proxy/adapter.js'
@@ -108,17 +111,24 @@ describe('代理行：路由随模式注册与注销', () => {
     for (const cleanup of cleanups.reverse()) cleanup()
   })
 
-  it('需求 1020：代理路由服务主对话请求时交给宿主行的续跑记账', async () => {
-    const bus = createProxyModeBus({ mode: () => true, proxySettings: () => ({}) })
-    const { ctx, llm, cleanups } = fakeCtx(bus, fakeAuth())
-    const note = vi.fn()
-    ctx.provide('antigravityRestartLedger', { note })
-    applyProxyRow(ctx, {})
-    const adapter = llm.registrations[0]?.adapter as { stream(options: unknown): AsyncIterable<unknown> }
-    const options = { provider: 'antigravity-proxy', model: 'gemini-4-argon', messages: [], sessionId: 'session-proxy' }
-    await expect((async () => { for await (const _ of adapter.stream(options)) { /* drain */ } })()).rejects.toBeDefined()
-    expect(note).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-proxy' }))
-    for (const cleanup of cleanups.reverse()) cleanup()
+  it('需求 1020：代理路由服务主对话请求时把会话记进缓存目录的 busy 文件，带 purpose 的请求不记', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'agy-proxy-busy-'))
+    vi.stubEnv('DSH_HOME', home)
+    try {
+      const bus = createProxyModeBus({ mode: () => true, proxySettings: () => ({}) })
+      const { ctx, llm, cleanups } = fakeCtx(bus, fakeAuth())
+      applyProxyRow(ctx, {})
+      const adapter = llm.registrations[0]?.adapter as { stream(options: unknown): AsyncIterable<unknown> }
+      const drain = async (options: unknown) => { try { for await (const _ of adapter.stream(options)) { /* drain */ } } catch { /* 未登录：AUTH */ } }
+      await drain({ provider: 'antigravity-proxy', model: 'gemini-4-argon', messages: [], sessionId: 'session-title', purpose: 'session-title' })
+      await drain({ provider: 'antigravity-proxy', model: 'gemini-4-argon', messages: [], sessionId: 'session-proxy' })
+      const file = join(home, 'cache', 'antigravity-acp', 'busy.json')
+      await vi.waitFor(async () => expect(JSON.parse(await readFile(file, 'utf8'))).toEqual(['session-proxy']))
+      for (const cleanup of cleanups.reverse()) cleanup()
+    } finally {
+      vi.unstubAllEnvs()
+      await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 })
+    }
   })
 
   it('宿主行缺席（服务未 provide）时代理行安静地不注册', () => {

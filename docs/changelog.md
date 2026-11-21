@@ -4,7 +4,7 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
-## 未发布
+## 0.1.46-local.3 · 2026-11-21
 
 - **dsh 重启后接着做**（需求 1020）：dsh 重启时经本插件在跑主对话一轮的会话，重启后自动收到续跑通知并开出一轮；主会话、子代理会话都适用，ACP 与代理两条路由都记。记录在缓存目录 `busy.json`，只存会话 ID。详见[配置](configuration.md#dsh-重启后接着做)。
 

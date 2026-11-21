@@ -1,0 +1,68 @@
+// TEMPORARY probe for 技术方案 §6 #4/#5; not committed.
+import { appendFile, mkdir, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+
+const KEY = Symbol.for('agy.restartProbe.timer')
+
+export function mountProbe(ctx: Context, cacheDir: string): void {
+  const log = (line: string) => mkdir(cacheDir, { recursive: true }).then(() => appendFile(join(cacheDir, 'probe.log'), `${new Date().toISOString()} ${line}\n`)).catch(() => undefined)
+  void log('apply')
+  const svc: Record<string, unknown> = {}
+  ctx.inject(['agents', 'sessions', 'goals', 'sessionController'], (scope) => {
+    for (const k of ['agents', 'sessions', 'goals', 'sessionController']) svc[k] = scope.get(k)
+    void log(`inject ok: ${Object.entries(svc).map(([k, v]) => `${k}=${v ? 'yes' : 'no'}`).join(' ')}`)
+  })
+  for (const k of ['agents', 'sessions', 'goals', 'sessionController', 'subagents']) {
+    ctx.inject([k], () => { void log(`inject single ${k} ok`) })
+  }
+  ctx.on('session/event' as never, ((session: { id?: string }, event: { type?: string; data?: unknown }) => {
+    if (event?.type === 'turn/start' || event?.type === 'turn/end') void log(`event ${session?.id} ${event.type} ${JSON.stringify(event.data ?? null).slice(0, 300)}`)
+  }) as never)
+  const poll = setInterval(() => {
+    void (async () => {
+      let req: { cwd: string; provider?: string; model?: string; reasoningEffort?: string; text: string; catalog?: boolean } | undefined
+      try { req = JSON.parse(await readFile(join(cacheDir, 'probe-start.json'), 'utf8')) } catch { return }
+      await rm(join(cacheDir, 'probe-start.json'), { force: true })
+      try {
+        const c = svc.sessionController as any
+        if (req!.catalog) { await log(`catalog ${JSON.stringify(await c.modelCatalog()).slice(0, 3000)}`); return }
+        const { sessionId } = await c.create({ cwd: req!.cwd })
+        await log(`created ${sessionId}`)
+        if (req!.provider) await log(`selected ${JSON.stringify(await c.selectModel({ sessionId, provider: req!.provider, model: req!.model, reasoningEffort: req!.reasoningEffort }))}`)
+        const r = await c.resolveAgent(sessionId)
+        if (!r.agent) { await log(`start resolve error ${String(r.error)}`); return }
+        r.agent.followup(createUserMessage({ content: [{ type: 'text', text: req!.text }], source: { kind: 'user' } }))
+        await log(`start followup sent ${sessionId}`)
+      } catch (e) { await log(`start failed ${e instanceof Error ? e.stack : String(e)}`) }
+    })()
+  }, 2000)
+  ctx.effect(() => () => clearInterval(poll))
+  const g = globalThis as Record<symbol, unknown>
+  if (g[KEY]) return
+  g[KEY] = setTimeout(() => {
+    void (async () => {
+      await log(`timer: ${Object.entries(svc).map(([k, v]) => `${k}=${v ? 'yes' : 'no'}`).join(' ')}`)
+      let ids: string[] = []
+      try { ids = JSON.parse(await readFile(join(cacheDir, 'probe-wake.json'), 'utf8')) } catch { await log('no probe-wake.json'); return }
+      await rm(join(cacheDir, 'probe-wake.json'), { force: true })
+      const controller = svc.sessionController as { resolveAgent(id: string): Promise<{ agent?: { followup(m: unknown): void; session: unknown }; error?: unknown }> } | undefined
+      const goals = svc.goals as { get?(a: unknown): { phase?: string } | undefined } | undefined
+      for (const id of ids) {
+        try {
+          const r = await controller!.resolveAgent(id)
+          if (!r.agent) { await log(`resolve ${id} error ${String(r.error)}`); continue }
+          let phase = 'n/a'
+          try { phase = goals?.get?.(r.agent)?.phase ?? 'none' } catch (e) { phase = `err ${String(e)}` }
+          const text = '[Antigravity] dsh 重启打断了上一轮。重启时还没结束的工具调用已被停止，结果未知。请从被打断的地方接着做。'
+          r.agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin:dsh-antigravity-acp', form: 'notice', summary: 'dsh 重启后续跑' } as never }))
+          await log(`followup sent ${id} goalPhase=${phase}`)
+        } catch (e) {
+          await log(`wake ${id} failed ${e instanceof Error ? e.stack : String(e)}`)
+        }
+      }
+    })()
+  }, 10_000)
+  ;(g[KEY] as { unref?: () => void }).unref?.()
+}

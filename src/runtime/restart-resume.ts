@@ -8,8 +8,9 @@
  *   收到 S 的 `turn/end` 时删掉，除非这一轮是被 dsh 关停（aborted / disposed）或
  *   冷加载补上的 interrupted 结束的——这两种正是要续跑的轮。被杀时没有任何事件，
  *   自然保留。
- * - 启动：每个 dsh 进程第一次装载时读出并清空 `busy.json`，延时（等 dsh 装好会话
- *   和 agent）逐个发通知。热重载不在新进程里，不读、不发。
+ * - 启动：每个 dsh 进程第一次装载时读一次 `busy.json`（不清空），延时（等 dsh 装好
+ *   会话和 agent）后逐个处理仍在文件里的会话：发通知前才把它删掉，所以延时内再重启
+ *   一次也不丢；延时内这一轮已经正常结束（被删掉）的不再发。热重载不在新进程里，不读、不发。
  * - 投递：照 omc `wake` 与 dsh-schedule 的写法，冷会话经 `sessionController.resolveAgent`
  *   取 Agent 后 `followup`；没加载的子代理会话经父会话投递。
  *
@@ -23,7 +24,7 @@ import type { AdapterRequestOptions } from '../adapter/request-options.js'
 
 /** 续跑通知的正文；需求 1020 要求写明的三件事都在里面。 */
 export const RESTART_TEXT =
-  '[Antigravity] dsh 重启打断了上一轮。重启时还没结束的工具调用已被停止，结果未知。请从被打断的地方接着做完。如果这个会话有进行中的目标，dsh 恢复时会把它停下：先调 get_goal，再用 update_goal 的 resume 恢复。'
+  '[Antigravity] dsh 重启打断了上一轮。重启时还没结束的工具调用已被停止，结果未知。请从被打断的地方接着做完。'
 /** 通知卡片上的一句话摘要。 */
 export const RESTART_SUMMARY = 'dsh 重启后接着做'
 /** 启动后等多久再发通知：dsh 要先装好会话与 agent（omc 实测用 10 秒）。 */
@@ -78,8 +79,8 @@ async function writeIds(file: string, ids: readonly string[]): Promise<void> {
 export interface BusyLedger {
   mark(sessionId: string): Promise<void>
   clear(sessionId: string): Promise<void>
-  /** 读出并清空：上一个进程留下的、没正常结束的会话。 */
-  take(): Promise<string[]>
+  /** 当前记着的会话（不改文件）。 */
+  read(): Promise<string[]>
 }
 
 export function createBusyLedger(file: string, log: Log = {}): BusyLedger {
@@ -95,12 +96,7 @@ export function createBusyLedger(file: string, log: Log = {}): BusyLedger {
   return {
     mark: (sessionId) => update(sessionId, true),
     clear: (sessionId) => update(sessionId, false),
-    take: () => serial(file, async () => {
-      const ids = await readIds(file)
-      if (ids === undefined) return []
-      await writeIds(file, []).catch(() => undefined)
-      return ids
-    }),
+    read: () => serial(file, async () => await readIds(file) ?? []),
   }
 }
 
@@ -237,25 +233,30 @@ function isRunning(agent: AgentLike | undefined): boolean {
   try { return agent?.status === 'running' } catch { return false }
 }
 
-/** 给一个被重启打断的会话发续跑通知；返回做了什么（写日志、测试用）。 */
-export async function wakeInterrupted(sessionId: string, services: ResumeServices, log: Log = {}): Promise<string> {
+/**
+ * 给一个被重启打断的会话发续跑通知；返回做了什么（写日志用）。`forget` 把它从 busy
+ * 文件里删掉：发通知之前删（通知开出的那一轮会重新记上），判定不归本插件续跑时也删；
+ * 已经有一轮在跑、或 dsh 服务还没就绪时不删（在跑的那一轮自己管）。
+ */
+export async function wakeInterrupted(sessionId: string, services: ResumeServices, log: Log = {}, forget: () => Promise<void> = async () => {}): Promise<string> {
   const controller = services.sessionController
-  if (!controller) return 'skip: no sessionController'
+  if (!controller) return 'keep: no sessionController'
+  const skip = async (reason: string) => { await forget(); return `skip: ${reason}` }
   let inspection: Inspection
   try {
     inspection = await controller.inspect(sessionId)
   } catch (error) {
-    return `skip: session unreadable (${errorText(error)})`
+    return skip(`session unreadable (${errorText(error)})`)
   }
   const events = inspection.events ?? []
   const provider = lastRequestProvider(events)
-  if (provider === undefined || !OWN_PROVIDERS.includes(provider)) return `skip: provider ${provider ?? 'none'}`
-  if (hasPendingNotice(events)) return 'skip: notice already pending'
+  if (provider === undefined || !OWN_PROVIDERS.includes(provider)) return skip(`provider ${provider ?? 'none'}`)
+  if (hasPendingNotice(events)) return skip('notice already pending')
   const logVersion = typeof inspection.meta?.version === 'number' ? inspection.meta.version : 0
 
   let loaded: AgentLike | undefined
   try { loaded = services.agents?.get?.(sessionId) } catch { loaded = undefined }
-  if (isRunning(loaded)) return 'skip: a turn is already running'
+  if (isRunning(loaded)) return 'keep: a turn is already running'
 
   const parentId = inspection.meta?.origin === 'subagent' && typeof inspection.meta.parentSession === 'string'
     ? inspection.meta.parentSession
@@ -263,8 +264,9 @@ export async function wakeInterrupted(sessionId: string, services: ResumeService
   if (loaded === undefined && parentId !== undefined) {
     // 没加载的子代理会话不能直接 resolve（归子代理路由管），经直接父会话投递。
     const deliver = services.subagents?.[DELIVER_SUBAGENT_PROMPT] as DeliverPrompt | undefined
-    if (typeof deliver !== 'function') return 'skip: no subagent delivery'
+    if (typeof deliver !== 'function') return skip('no subagent delivery')
     const parent = resolved(await controller.resolveAgent(parentId))
+    await forget()
     const message = createUserMessage({ content: [{ type: 'text', text: RESTART_TEXT }], source: noticeSource(false, logVersion) as never })
     await deliver.call(services.subagents, parent, sessionId, message.content, message.source, AbortSignal.timeout(60_000), 'queue')
     log.info?.(`antigravity-acp: 已经父会话 ${parentId} 给子会话 ${sessionId} 发重启续跑通知`)
@@ -272,9 +274,10 @@ export async function wakeInterrupted(sessionId: string, services: ResumeService
   }
 
   const agent = loaded ?? resolved(await controller.resolveAgent(sessionId))
-  if (isRunning(agent)) return 'skip: a turn is already running'
+  if (isRunning(agent)) return 'keep: a turn is already running'
   let goalActive = false
   try { goalActive = services.goals?.get?.(agent)?.phase === 'active' } catch { goalActive = false }
+  await forget()
   agent.followup(createUserMessage({ content: [{ type: 'text', text: RESTART_TEXT }], source: noticeSource(goalActive, logVersion) as never }))
   log.info?.(`antigravity-acp: 已给会话 ${sessionId} 发重启续跑通知`)
   return goalActive ? 'sent (user source, goal active)' : 'sent'
@@ -295,21 +298,24 @@ export function resumeOnBoot(ledger: BusyLedger, services: () => ResumeServices,
   if (existing) { existing.services = services; existing.log = log; return undefined }
   const state: BootState = { services, log }
   g[BOOT_KEY] = state
-  const taken = ledger.take()
+  const atBoot = ledger.read()
   let done!: () => void
   const finished = new Promise<void>((resolve) => { done = resolve })
   const timer = setTimeout(() => {
     void (async () => {
-      const ids = await taken
+      // 只处理启动时就记着、现在还记着的：延时内正常结束的已被删掉，延时内新开的轮不是重启打断的。
+      const still = new Set(await ledger.read())
+      const ids = (await atBoot).filter(id => still.has(id))
       if (ids.length > 0) state.log.info?.(`antigravity-acp: 重启前有一轮在跑的会话：${ids.join(', ')}`)
       for (const id of ids) {
         try {
-          const outcome = await wakeInterrupted(id, state.services(), state.log)
-          if (outcome.startsWith('skip')) state.log.info?.(`antigravity-acp: 会话 ${id} 不续跑（${outcome}）`)
+          const outcome = await wakeInterrupted(id, state.services(), state.log, () => ledger.clear(id))
+          if (!outcome.startsWith('sent')) state.log.info?.(`antigravity-acp: 会话 ${id} 不续跑（${outcome}）`)
         } catch (error) {
           state.log.warn?.(`antigravity-acp: 给会话 ${id} 发重启续跑通知失败：${errorText(error)}`)
         }
       }
+      state.log.info?.(`antigravity-acp: 重启续跑检查完成（${ids.length} 个会话）`)
     })().finally(done)
   }, delayMs)
   ;(timer as { unref?: () => void }).unref?.()

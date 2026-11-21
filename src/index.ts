@@ -702,13 +702,12 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
   ctx.plugin(AgYProxyAccountService, proxyAccount)
 
   // 需求 1020：dsh 重启时在跑的一轮，重启后接着做。两条路由的主对话请求都记进
-  // busy 文件（代理行经 antigravityRestartLedger 交过来），一轮正常结束时删掉。
+  // 缓存目录的 busy 文件（代理行按同一个缓存目录自己记），一轮正常结束时删掉。
   const restartLedger = createBusyLedger(busyFile(cacheDir), {
     warn: (message) => ctx.logger?.warn?.(message),
   })
   const noteRequest = (options: Parameters<typeof noteConversationRequest>[1]) => noteConversationRequest(restartLedger, options)
   trackRequests(adapter, noteRequest)
-  const unprovideLedger = ctx.provide('antigravityRestartLedger', { note: noteRequest })
   const unsubscribeTurns = ctx.on('session/event' as never, busyTurnListener(restartLedger) as never) as unknown as () => void
   const resumeServices: ResumeServices = {}
   ctx.inject(['sessionController'], (scope) => {
@@ -794,7 +793,7 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
 
   // cordis 4.x 的规范 dispose 挂点：generator effect，卸载时逆序执行。
   ctx.effect(function* () {
-    yield () => { unsubscribeMode(); unsubscribeModeBus(); unsubscribeAccount(); unprovideMode(); unprovideAuth(); unprovideLedger(); unsubscribeTurns?.() }
+    yield () => { unsubscribeMode(); unsubscribeModeBus(); unsubscribeAccount(); unprovideMode(); unprovideAuth(); unsubscribeTurns?.() }
     yield () => registration()
     yield async () => control.dispose()
     yield async () => {

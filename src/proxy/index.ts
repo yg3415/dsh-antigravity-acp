@@ -22,8 +22,9 @@ import { redactSensitiveText } from '../runtime/redact.js'
 import type { ProxyModeBus } from './mode-bus.js'
 import type { ProxyAccountService } from './account-service.js'
 import type { ProxyAttachmentReader } from './image.js'
-import { trackRequests } from '../runtime/restart-resume.js'
-import type { AdapterRequestOptions } from '../adapter/request-options.js'
+import { busyFile, createBusyLedger, noteConversationRequest, trackRequests } from '../runtime/restart-resume.js'
+import type { BusyLedger } from '../runtime/restart-resume.js'
+import { resolveCacheDir } from '../runtime/binary.js'
 
 export const name = 'antigravity-proxy-router'
 export const inject = ['llm']
@@ -31,9 +32,6 @@ export const inject = ['llm']
 export interface ProxyRouterConfig {
   responseHeaderTimeoutMs?: number
 }
-
-/** 宿主行 provide 的续跑记账面。 */
-interface RestartLedger { note(options: AdapterRequestOptions): void }
 
 export function apply(ctx: Context, _config: ProxyRouterConfig = {}): void {
   // 附件服务是可选依赖：在场时代理模式接受图片输入，缺席时文本能力不受影响。
@@ -44,19 +42,17 @@ export function apply(ctx: Context, _config: ProxyRouterConfig = {}): void {
     attachments = store
     scope.effect(() => () => { if (attachments === store) attachments = undefined })
   })
-  // 需求 1020：宿主行的续跑记账；缺席时（只装了代理行）不记。
-  let restartLedger: RestartLedger | undefined
-  ctx.inject(['antigravityRestartLedger'], (scope) => {
-    const ledger = scope.get('antigravityRestartLedger') as RestartLedger | undefined
-    restartLedger = ledger
-    scope.effect(function* () { yield () => { if (restartLedger === ledger) restartLedger = undefined } })
+  // 需求 1020：主对话请求记进缓存目录的 busy 文件，和宿主行同一份、同一条串行链；
+  // 清除与重启后发通知在宿主行。
+  const restartLedger = createBusyLedger(busyFile(resolveCacheDir()), {
+    warn: (message) => ctx.logger?.warn?.(message),
   })
   // 弱等待宿主行的两个 provide：宿主行未装载时本行不注册路由（默认关闭语义）。
   ctx.inject(['antigravityProxyAuth', 'antigravityProxyMode'], (scope) => {
     const auth = scope.get('antigravityProxyAuth') as ProxyAccountService | undefined
     const bus = scope.get('antigravityProxyMode') as (ProxyModeBus & { proxySettings(): { url?: string; bypass?: string } }) | undefined
     if (!auth || !bus) return
-    mountProxyRouter(scope, auth, bus, () => attachments, () => restartLedger)
+    mountProxyRouter(scope, auth, bus, () => attachments, restartLedger)
   })
 }
 
@@ -65,7 +61,7 @@ function mountProxyRouter(
   auth: ProxyAccountService,
   bus: ProxyModeBus & { proxySettings(): { url?: string; bypass?: string } },
   readAttachments: () => ProxyAttachmentReader | undefined,
-  readRestartLedger: () => RestartLedger | undefined = () => undefined,
+  restartLedger?: BusyLedger,
 ): void {
   // 代理链路的出网代理与官方进程同一套设置；非法地址不阻断装载（设置页仍可修正）。
   const transport: ProxyTransport = createProxyTransport({
@@ -93,7 +89,7 @@ function mountProxyRouter(
     },
   })
 
-  trackRequests(adapter, (options) => readRestartLedger()?.note(options))
+  trackRequests(adapter, (options) => noteConversationRequest(restartLedger, options))
 
   ctx.provide('antigravityProxyCatalog', { models: (force: boolean) => adapter.discoverModels(force) })
 

@@ -81,7 +81,7 @@ ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" scripts/check-desktop-compat.cjs
 | 官方 CLI 容量来源 | 本机 `agy models` 实测 23 行、每行只有两列（ID、名称）；ACP 模型容量来自会话 `usage_update.size`，`used` 与单次计费 token 分开 |
 | 代理思考摘要 | 同一 Hydrogen `medium` 线模型的真实对照：两次 HTTP 200；原请求收到正文和签名但无摘要，仅添加 `includeThoughts: true` 后收到 1,135 字符摘要。Neon `medium` 经 DSH NEXT 2.0.24-next 所带 Core `0.2.2-rc.5`，真实生成输出 2,177 字符摘要及 reasoning 块，正常结束 |
 | 额度快照 | 用桌面包内 Cordis 拉取真实 Google 额度，获得 3 个分组；新开隔离 Host，在上游不可调用的条件下重读同一快照，分组与时间戳一致。自动回归覆盖独立定时、手动合并、读取不等待刷新、换账户隔离与过期标记 |
-| 重启后接着做（需求 1020） | Vitest 覆盖 busy 记账（ACP 与代理两条入口、`purpose` 请求不记、正常 / Stop / 出错清除、disposed 与 interrupted 保留）、启动后通知（文案、清空文件、provider 跳过、inbox 去重、子代理经父会话、目标用 user source、热重载不重发、已在跑与找不到会话跳过）。2026-11-21 任务实例（全局 dsh 0.2.1-rc.5、真实 `gemini-4-argon`）：会话跑 `sleep 300` 时重启实例，10 秒后自动开出第 2 轮接着做；第 2 轮里再重启一次，开出第 3 轮跑完并写出第二步的文件；同实例里已经结束的会话重启后不开轮 |
+| 重启后接着做（需求 1020） | Vitest 经 `apply` 后的池入口、`session/event` 与代理行 adapter 覆盖 busy 记账（ACP 与代理两条入口、`purpose` 请求不记、正常 / Stop / 出错清除、disposed 与 interrupted 保留）、启动后通知（文案、延时前不动文件、延时内已结束的不发、provider 跳过、inbox 去重、子代理经父会话、目标用 user source、热重载不重发、已在跑与找不到会话跳过）。2026-11-21 任务实例（全局 dsh 0.2.1-rc.5、真实 `gemini-4-argon`）：会话跑 `sleep 300` 时重启实例，10 秒后自动开出第 2 轮接着做；第 2 轮里再重启一次，开出第 3 轮跑完并写出第二步的文件；同实例里已经结束的会话重启后不开轮 |
 | 工具 / runtime | 假 ACP / MCP、乱序工具结果、池所有权、续轮变更、取消、写入阻塞和回收 |
 | Claude 历史工具批次 | 桌面 Core `0.2.2-rc.5` + 真实 Sonnet 5.5 `medium`：并行两个工具只回填一个后续发消息，已安装 0.1.42 上游 HTTP 400 / `PROTOCOL_DRIFT`；候选用同一历史正常完成（HTTP 200），两个结果都缺失时也正常完成；当前批次未收齐时在本地返回 `INVALID_ARGS`，不派发 |
 | 图片 | 附件引用校验、图片内容映射与跨 worker 能力；代理模式 inlineData 准入、12MB 预算与 offload 协商、附件缺席降级；未调用真实视觉模型 |

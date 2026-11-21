@@ -61,8 +61,8 @@ ACP 官方 agent 在同一会话内会保留上下文（2026-10-23 真机验证�
 没有配置项，始终开启。dsh 重启（正常关停，或进程被杀后重开）时，经本插件（ACP 路由或代理路由）正在跑主对话一轮的会话，重启后会收到一条续跑通知并开出一轮，不需要手动发「继续」；主会话与子代理会话都适用。
 
 - **记录**：缓存目录的 `busy.json`（按 `DSH_HOME` 区分，原子写）只存会话 ID。主对话请求开始时记入；收到这一轮的 `turn/end` 时删除，除非这一轮是被 dsh 关停（`aborted` / `disposed`）或冷加载补上的 `interrupted` 结束的。标题生成、压缩等带 `purpose` 的请求不记。
-- **启动**：每个 dsh 进程第一次装载插件时读出并清空 `busy.json`，10 秒后逐个经 `sessionController.resolveAgent` 取 Agent 并 `followup` 通知；没加载的子代理会话经父会话投递。通知写明 dsh 重启打断了上一轮、还没结束的工具调用已被停止且结果未知、从被打断的地方接着做。会话有进行中的目标时通知用 user source（dsh 只接受人发起的轮恢复目标），否则是插件 notice（`plugin:dsh-antigravity-acp`）。
-- **跳过**：会话最后一条 `request/header` 的 provider 不是 `antigravity-acp` / `antigravity-proxy`（换到别的模型后被打断，交给对应插件）、inbox 里已有本插件还没被取走的续跑通知、会话已经有一轮在跑、会话读不到（重启期间被删）。插件热重载不在新进程里，不读、不发。
+- **启动**：每个 dsh 进程第一次装载插件时读一次 `busy.json`（不清空），10 秒后只处理还记着的会话（延时内这一轮已经正常结束的不再发），发通知前才把它删掉，所以延时内再重启一次也不丢；逐个经 `sessionController.resolveAgent` 取 Agent 并 `followup` 通知；没加载的子代理会话经父会话投递。通知写明 dsh 重启打断了上一轮、还没结束的工具调用已被停止且结果未知、从被打断的地方接着做。会话有进行中的目标时通知用 user source（dsh 只接受人发起的轮恢复目标），否则是插件 notice（`plugin:dsh-antigravity-acp`）。
+- **跳过**（同时从 `busy.json` 删掉；已经有一轮在跑的除外，留给那一轮自己管）：会话最后一条 `request/header` 的 provider 不是 `antigravity-acp` / `antigravity-proxy`（换到别的模型后被打断，交给对应插件）、inbox 里已有本插件还没被取走的续跑通知、会话已经有一轮在跑、会话读不到（重启期间被删）。插件热重载不在新进程里，不读、不发。
 - **不保证**：`busy.json` 写入失败时这一轮不续跑（记 warn）；通知投递失败时只记日志，不重试。重启时正在跑的工具调用由 dsh 补成「结果未知」，要不要重做由模型判断。
 
 ### 取消与进程保留

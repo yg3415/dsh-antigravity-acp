@@ -58,7 +58,7 @@ function loadRegistrations(options: QuotaStubOptions = {}): Map<string, SlotRegi
   lastInjectDeps = []
   lastMountCalls = []
   let registration: {
-    factory: (require: (id: string) => unknown) => { apply: (ctx: Record<string, unknown>) => void }
+    factory: (require: (id: string) => unknown) => { inject: string[]; apply: (ctx: Record<string, unknown>) => void }
   } | undefined
   runInNewContext(buildClientSource(), {
     window: { __ModuleLoader__: { load: (value: unknown) => { registration = value as typeof registration } }, innerHeight: 844,
@@ -121,6 +121,7 @@ function loadRegistrations(options: QuotaStubOptions = {}): Map<string, SlotRegi
   }
 
   const registrations = new Map<string, SlotRegistration>()
+  let declared: string[] = []
   const mountedPackages = new Set<string>()
   const slots = {
     inject: (_name: string, factory: () => unknown) => {
@@ -162,12 +163,15 @@ function loadRegistrations(options: QuotaStubOptions = {}): Map<string, SlotRegi
       {
         get(target, prop, receiver) {
           if (typeof prop === 'string' && prop in target) return Reflect.get(target, prop, receiver)
+          if (typeof prop === 'string' && declared.includes(`remote.${prop}`)) return {}
           throw new Error(`cannot get property "remote.${String(prop)}" without inject`)
         },
       },
     ),
     modelDirectories: {
-      directoryFor: () => ({
+      // 宿主的 ModelDirectoryResolver 经 cordis 可追踪代理以**调用方**上下文读取
+      // `this.ctx.remote.session`（会话目录首次创建时），调用方必须声明 remote.session。
+      directoryFor: () => (void scope.remote.session, {
         store: {
           subscribe: () => () => {},
           getSnapshot: () => (options.quotaProvider ? { current: { provider: options.quotaProvider } } : {}),
@@ -176,6 +180,7 @@ function loadRegistrations(options: QuotaStubOptions = {}): Map<string, SlotRegi
     },
   }
   const plugin = registration.factory(() => react)
+  declared = plugin.inject
   plugin.apply(scope)
   return registrations
 }
@@ -302,6 +307,11 @@ describe('browser client module', () => {
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
+  it('额度药丸槽位注入在模型选择器之前首次建会话目录时不抛「without inject」', () => {
+    const pill = loadRegistrations().get('antigravity-quota')!
+    expect(() => pill.row.inject!('session-first')).not.toThrow()
+  })
+
   it('代理说明明确留空继承宿主环境，不承诺强制直连', () => {
     const tree = loadCard()({ remote: {} })
     expect(texts(tree).join('')).toContain('留空继承宿主代理环境')
@@ -336,7 +346,8 @@ describe('browser client module', () => {
     expect(plugin.name).toBe('dsh-bundle-antigravity-host')
     // remote.settings / remote.llm 必须逐个声明：缺任一项时读属性会抛
     // 「cannot get property "remote.<ns>" without inject」并击穿 settings.section。
-    expect(plugin.inject).toEqual(['slots', 'remote', 'remote.settings', 'remote.llm'])
+    // remote.session 供药丸槽位注入里的 modelDirectories.directoryFor 以本插件上下文读取。
+    expect(plugin.inject).toEqual(['slots', 'remote', 'remote.settings', 'remote.llm', 'remote.session'])
     expect(plugin.apply).toBeTypeOf('function')
   })
 

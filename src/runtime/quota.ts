@@ -34,6 +34,12 @@ export const CODE_ASSIST_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com/v
 export const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 /** 官方 CLI 登录态文件（只读）。 */
 export const TOKEN_SUBPATH = ['.gemini', 'antigravity-cli', 'antigravity-oauth-token'] as const
+/**
+ * ACP 登录态文件（只读）。新版官方 CLI 在 macOS 上把登录态存进钥匙串，
+ * 不再留 `antigravity-oauth-token`；插件导入后落成的这份文件带 refresh_token
+ * 与 OAuth client，额度取数在 CLI 文件缺失时改用它。
+ */
+export const ACP_TOKEN_SUBPATH = ['.gemini', 'antigravity-acp', 'acp_token.json'] as const
 
 /** 提前多少毫秒视为「将过期」并触发换发。 */
 export const TOKEN_EXPIRY_MARGIN_MS = 60_000
@@ -427,6 +433,38 @@ export function parseQuotaSummary(raw: unknown): QuotaGroup[] {
   })
 }
 
+/** 额度取数用的登录态：先官方 CLI 文件，缺失或无 token 时退到 `acp_token.json`。 */
+export interface QuotaCredential {
+  state: QuotaTokenState
+  /** 登录态文件自带的 OAuth client（acp_token.json）；缺省时从官方二进制提取。 */
+  client?: OAuthClientMeta
+}
+
+/** 按顺序解析两份登录态；都读不到返回 undefined。`read` 读文件文本，失败可抛。 */
+export async function readQuotaCredential(
+  read: (path: string) => Promise<string>,
+  home: string,
+): Promise<QuotaCredential | undefined> {
+  try {
+    const state = parseTokenState(JSON.parse(await read(join(home, ...TOKEN_SUBPATH))))
+    if (state.accessToken || state.refreshToken) return { state }
+  } catch {
+    // CLI 文件不在或不可解析，试 ACP 登录态。
+  }
+  try {
+    const raw: unknown = JSON.parse(await read(join(home, ...ACP_TOKEN_SUBPATH)))
+    if (!isRecord(raw)) return undefined
+    const text = (key: string): string | undefined => (typeof raw[key] === 'string' && raw[key] !== '' ? raw[key] as string : undefined)
+    const state: QuotaTokenState = { accessToken: text('token'), refreshToken: text('refresh_token'), expiry: text('expiry') }
+    if (!state.accessToken && !state.refreshToken) return undefined
+    const clientId = text('client_id')
+    const clientSecret = text('client_secret')
+    return { state, ...(clientId && clientSecret ? { client: { clientId, clientSecret } } : {}) }
+  } catch {
+    return undefined
+  }
+}
+
 /** 取一份额度快照（内存缓存 + 过期 token 换发 + 401/403 重试一次）。 */
 export async function fetchQuotaSnapshot(
   cache: { value?: QuotaSnapshot; at?: number },
@@ -448,19 +486,14 @@ async function fetchQuotaSnapshotUncached(deps: QuotaDeps): Promise<QuotaSnapsho
   const stamp = () => new Date(now()).toISOString()
   try {
     const readFileImpl = deps.readFileImpl ?? defaultReadFile
-    const home = (deps.homedir ?? homedir)()
-    const tokenPath = join(home, ...TOKEN_SUBPATH)
-    let state: QuotaTokenState
-    try {
-      state = parseTokenState(JSON.parse(await readFileImpl(tokenPath)))
-    } catch {
-      return failure(stamp(), 'token-missing', '读不到官方 CLI 登录态（antigravity-oauth-token）')
+    const credential = await readQuotaCredential(readFileImpl, (deps.homedir ?? homedir)())
+    if (!credential) {
+      return failure(stamp(), 'token-missing', '读不到登录态（官方 CLI 的 antigravity-oauth-token 和 ACP 的 acp_token.json 都没有可用 token），请先在设置页连接 Antigravity')
     }
-    if (!state.accessToken && !state.refreshToken) {
-      return failure(stamp(), 'token-missing', '官方 CLI 登录态里没有可用 token，请先在 Antigravity 登录')
-    }
+    let state = credential.state
+    const resolveClient = async (): Promise<OAuthClientMeta | undefined> => credential.client ?? resolveOAuthClient(deps)
     if (!isTokenUsable(state, now())) {
-      const client = await resolveOAuthClient(deps)
+      const client = await resolveClient()
       if (!client) {
         return failure(stamp(), 'refresh-unavailable', 'access token 已过期且无法取得 OAuth client 元数据（可设 AGY_OAUTH_CLIENT_ID/SECRET）')
       }
@@ -484,7 +517,7 @@ async function fetchQuotaSnapshotUncached(deps: QuotaDeps): Promise<QuotaSnapsho
       // 401/403：token 被上游拒绝（可能刚换发也失效），换发一次再试。
       if (error instanceof QuotaError && error.code === 'request-failed'
         && (error.status === 401 || error.status === 403)) {
-        return retryAfterRefresh(state, stamp, deps)
+        return retryAfterRefresh(state, resolveClient, stamp, deps)
       }
       return failure(stamp(), errorCodeOf(error), describeError(error))
     }
@@ -495,11 +528,12 @@ async function fetchQuotaSnapshotUncached(deps: QuotaDeps): Promise<QuotaSnapsho
 
 async function retryAfterRefresh(
   state: QuotaTokenState,
+  resolveClient: () => Promise<OAuthClientMeta | undefined>,
   stamp: () => string,
   deps: QuotaDeps,
 ): Promise<QuotaSnapshot> {
   try {
-    const client = await resolveOAuthClient(deps)
+    const client = await resolveClient()
     if (!client) return failure(stamp(), 'refresh-unavailable', '请求被拒（401/403）且无法取得 OAuth client 元数据')
     const refreshed = await refreshAccessToken(state, client, deps)
     const project = await loadCodeAssist(refreshed.accessToken as string, deps)

@@ -112,7 +112,7 @@ ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因�
 
 插件在 ACP 模式使用本机官方 ACP 的当前登录态；设置页没有保存多个 Google 账号或按会话选账号的入口。
 
-优先复用本机已有 ACP 凭据。需要导入时，只读 `~/.gemini/antigravity-cli/antigravity-oauth-token`，换发后写入官方 ACP 使用的 `~/.gemini/antigravity-acp/acp_token.json`，并在 `settings.json` 缺少认证方式时合并 `auth.type = oauth-personal`。保留既有设置与用户指定的其它认证方式，不覆盖无法解析的设置文件。官方进程启动时固定带 `AGY_ACP_FORCE_FILE_STORAGE=1`：官方 server 1.4.0 在 macOS 上不设它就改读钥匙串，读不到这个文件，session/new 时拉起浏览器登录。
+优先复用本机已有 ACP 凭据。需要导入时，只读 `~/.gemini/antigravity-cli/antigravity-oauth-token`，换发后写入官方 ACP 使用的 `~/.gemini/antigravity-acp/acp_token.json`，并在 `settings.json` 缺少认证方式时合并 `auth.type = oauth-personal`。保留既有设置与用户指定的其它认证方式，不覆盖无法解析的设置文件。ACP 模式的套餐额度同样先读 CLI 登录态，读不到（新版 CLI 在 macOS 上存钥匙串、不留该文件）时只读 `acp_token.json`，用它的 refresh_token 和 OAuth client 换发。官方进程启动时固定带 `AGY_ACP_FORCE_FILE_STORAGE=1`：官方 server 1.4.0 在 macOS 上不设它就改读钥匙串，读不到这个文件，session/new 时拉起浏览器登录。
 
 解压官方包后给解压目录里的每个文件补执行位：1.4.0 的 macOS 包除主程序外还带 `localharness_external`，没有执行位时运行报 Permission denied。命中缓存时同样补，旧缓存会自己修好。
 

@@ -4,7 +4,7 @@
 
 ## 版本号
 
-版本号写成 `<上游版本>-local.<序号>`，当前是 `0.1.46-local.3`（基于上游 0.1.46）。部署脚本 `ops/deploy-antigravity-fork.sh`（在 my-superagent 里）打出的 tarball 放在 `~/.dsh/plugins/`。
+版本号写成 `<上游版本>-local.<序号>`，当前是 `0.1.46-local.4`（基于上游 0.1.46）。部署脚本 `ops/deploy-antigravity-fork.sh`（在 my-superagent 里）打出的 tarball 放在 `~/.dsh/plugins/`。
 
 改 `package.json` 的 `version` 时，在同一个分支里改上面这句的版本号，并在下表加一行（或在已有的那一行补上版本号）。
 
@@ -17,4 +17,5 @@
 | 官方进程环境固定带 `AGY_ACP_FORCE_FILE_STORAGE=1`（0.1.46-local.1，PRD 需求 1017） | `src/protocol/agent-link.ts` 的 `officialAgentEnv` | 官方 server 1.4.0 在 macOS 上不设这个变量就不读插件写的 `~/.gemini/antigravity-acp/acp_token.json`，session/new 时打出「Credentials missing or invalid. Launching browser login flow...」，150 秒超时；设了以后 3–4 秒成功（父任务在 3093 上实测）。官方进程的环境按白名单拼，宿主的环境变量传不进去，只能在这里加。所有平台都设：插件在所有平台都靠这个文件；Linux、Windows 上设了以后的行为没有实测。升级官方 server 版本后核对这个变量名仍然有效，失效时表现是 session/new 又要浏览器登录 |
 | 客户端插件 inject 补 `remote.session`（0.1.46-local.2） | `src/client.js` 的插件 `inject` | 额度药丸的槽位注入调用 `modelDirectories.directoryFor`，宿主 dsh-client-ui-model-selection 以调用方上下文读取 `ctx.remote.session`；药丸先于模型选择器首次建会话目录时（390 手机会话面板）抛 `cannot get property "remote.session" without inject`，desk 的实例用例 panes-navigation 收到 pageerror（父任务 desk-fc7e184b，本任务 desk-1abf71ee）。上游同样漏声明；合并上游时上游补上了就用上游的 |
 | dsh 重启时在跑的 Antigravity 会话重启后接着做（0.1.46-local.3，PRD 需求 1020） | 新增 `src/runtime/restart-resume.ts`；`src/index.ts` 包 ACP 池、监听 `session/event`、inject `sessionController` / `agents` / `goals`、启动钩子；`src/proxy/index.ts` 包代理 adapter（按同一个缓存目录记） | 上游没有这个功能。主对话请求把会话记进缓存目录 `busy.json`，一轮正常结束、用户 Stop、出错时删掉，dsh 关停（aborted/disposed）和冷加载补的 interrupted 保留；每个 dsh 进程第一次装载时读一次（不清空），10 秒后对仍记着的会话、发通知前才删掉它，经 `sessionController.resolveAgent` + `followup` 发续跑通知（子代理经父会话 `dsh.subagent.deliverPrompt`）。写法照 omc 的 `resumeInterrupted` / `wake`（父任务 desk-333bf255，本任务 desk-192be3de）。升级 dsh 时核对：冷加载仍补 `turn/end {interrupted}` 和「结果未知」的工具结果；`turn/end` 的 disposed 写法、`sessionController.resolveAgent` / `inspect`、`dsh.subagent.deliverPrompt` 仍在。全在新文件和两处接线里，合并上游一般不冲突 |
+| ACP 模式额度在官方 CLI 登录态文件缺失时改读 `acp_token.json`（0.1.46-local.4） | `src/runtime/quota.ts` 的 `readQuotaCredential`、`fetchQuotaSnapshot`；`src/quota/snapshot-store.ts` 的 `cliQuotaIdentity` | 新版官方 agy CLI 在 macOS 上不再留 `~/.gemini/antigravity-cli/antigravity-oauth-token`，上游额度只读这个文件，生产对话药丸显示「读不到官方 CLI 登录态（antigravity-oauth-token）」，三组都是「未提供额度数据」，而对话本身正常（官方 ACP 用的是插件落成的 `~/.gemini/antigravity-acp/acp_token.json`）。改成 CLI 文件缺失或没有 token 时读 `acp_token.json`：refresh_token 换发、换发用文件里自带的 OAuth client，快照身份也取它的 refresh_token（本任务 desk-f071dbea）。文件只读不写回。合并上游时上游改了额度登录态来源的，按这里的顺序核对 |
 | AGENTS.md 开头指向 my-superagent 的规则 | `AGENTS.md` 第一段 | 本仓库是工作台仓库，遵守 my-superagent 的全套规则。上游的项目说明留在下面不动，整份替换的话上游每次改 AGENTS.md 合并都会冲突 |

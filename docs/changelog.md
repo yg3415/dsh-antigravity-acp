@@ -4,6 +4,10 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 未发布
+
+- **dsh 重启后接着做**（需求 1020）：dsh 重启时经本插件在跑主对话一轮的会话，重启后自动收到续跑通知并开出一轮；主会话、子代理会话都适用，ACP 与代理两条路由都记。记录在缓存目录 `busy.json`，只存会话 ID。详见[配置](configuration.md#dsh-重启后接着做)。
+
 ## 0.1.46 · 2026-11-20
 
 - **客户端 i18n**：设置卡片、额度药丸与 Host 回传的固定状态文本支持简体中文 / English。语言取自 `navigator.language`（缺失时看 `<html lang>`），非中文环境显示英文，判定不到时保持中文；字典缺项回落中文，Host 动态拼接的文本原样显示。字典与内核拆在 `src/client-i18n/`，构建时内联为单个 `dist/client.js`。宿主配置编辑器中的字段说明（`Config` schema）仍是中文。

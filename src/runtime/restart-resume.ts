@@ -23,7 +23,7 @@ import type { AdapterRequestOptions } from '../adapter/request-options.js'
 
 /** 续跑通知的正文；需求 1020 要求写明的三件事都在里面。 */
 export const RESTART_TEXT =
-  '[Antigravity] dsh 重启打断了上一轮。重启时还没结束的工具调用已被停止，结果未知（需要的话先确认再决定要不要重做）。请从被打断的地方接着做完。如果这个会话有进行中的目标，dsh 恢复时会把它停下：先调 get_goal，再用 update_goal 的 resume 恢复。'
+  '[Antigravity] dsh 重启打断了上一轮。重启时还没结束的工具调用已被停止，结果未知。请从被打断的地方接着做完。如果这个会话有进行中的目标，dsh 恢复时会把它停下：先调 get_goal，再用 update_goal 的 resume 恢复。'
 /** 通知卡片上的一句话摘要。 */
 export const RESTART_SUMMARY = 'dsh 重启后接着做'
 /** 启动后等多久再发通知：dsh 要先装好会话与 agent（omc 实测用 10 秒）。 */

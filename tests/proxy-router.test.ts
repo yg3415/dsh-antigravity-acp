@@ -14,7 +14,7 @@ import type { ProxyCredential } from '../src/proxy/account-store.js'
 
 interface FakeLlm {
   registerAdapter: ReturnType<typeof vi.fn>
-  registrations: Array<{ providers: string[]; replace: ReturnType<typeof vi.fn>; disposed: boolean }>
+  registrations: Array<{ providers: string[]; replace: ReturnType<typeof vi.fn>; disposed: boolean; adapter?: unknown }>
 }
 
 function fakeCtx(bus: ProxyModeBus, auth: ProxyAccountService) {
@@ -22,8 +22,8 @@ function fakeCtx(bus: ProxyModeBus, auth: ProxyAccountService) {
     registerAdapter: vi.fn(),
     registrations: [],
   }
-  llm.registerAdapter.mockImplementation((providers: string[]) => {
-    const entry = { providers: [...providers], replace: vi.fn(), disposed: false }
+  llm.registerAdapter.mockImplementation((providers: string[], adapter?: unknown) => {
+    const entry = { providers: [...providers], replace: vi.fn(), disposed: false, adapter }
     entry.replace.mockImplementation((next: string[]) => { entry.providers = [...next] })
     llm.registrations.push(entry)
     const dispose = () => { entry.disposed = true; entry.providers = [] }
@@ -105,6 +105,19 @@ describe('代理行：路由随模式注册与注销', () => {
     bus.notify()
     expect(llm.registrations[0]?.providers).toEqual([])
 
+    for (const cleanup of cleanups.reverse()) cleanup()
+  })
+
+  it('需求 1020：代理路由服务主对话请求时交给宿主行的续跑记账', async () => {
+    const bus = createProxyModeBus({ mode: () => true, proxySettings: () => ({}) })
+    const { ctx, llm, cleanups } = fakeCtx(bus, fakeAuth())
+    const note = vi.fn()
+    ctx.provide('antigravityRestartLedger', { note })
+    applyProxyRow(ctx, {})
+    const adapter = llm.registrations[0]?.adapter as { stream(options: unknown): AsyncIterable<unknown> }
+    const options = { provider: 'antigravity-proxy', model: 'gemini-4-argon', messages: [], sessionId: 'session-proxy' }
+    await expect((async () => { for await (const _ of adapter.stream(options)) { /* drain */ } })()).rejects.toBeDefined()
+    expect(note).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-proxy' }))
     for (const cleanup of cleanups.reverse()) cleanup()
   })
 
